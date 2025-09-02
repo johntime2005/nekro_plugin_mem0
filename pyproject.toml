@@ -1,11 +1,11 @@
 [tool.poetry]
-name = "nekro-plugin-template"
-version = "1.0.0-dev"
-description = "NekroAgent 插件模板"
-authors = ["KroMiose <li_xiangff@163.com>"]
+name = "nekro-plugin-memory"
+version = "1.1.0"
+description = "Nekro Agent 长期记忆插件，基于 mem0 实现"
+authors = ["johntime2005 <johntime2005@github.com>"]
 readme = "README.md"
 packages = []
-repository = "https://github.com/KroMiose/nekro-plugin-template"
+repository = "https://github.com/johntime2005/nekro-plugin-memory"
 
 
 [tool.poetry.dependencies]
