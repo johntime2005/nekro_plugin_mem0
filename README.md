@@ -1,100 +1,94 @@
-# NekroAgent 插件模板
+# Nekro Agent 长期记忆插件 (nekro-plugin-memory)
 
-> 一个帮助开发者快速创建 NekroAgent 插件的模板仓库。
+> 一个为 NekroAgent 提供强大长期记忆能力的插件，基于 [mem0](https://github.com/mem0-ai/mem0) 实现。
+
+## ✨ 核心功能
+
+- **🧠 长期记忆**: 让 Agent 能够跨越多个会话，持续记忆和遗忘关键信息。
+- **🔍 智能搜索**: 支持基于自然语言的语义搜索，能根据上下文智能检索相关记忆。
+- **🔗 模型联动**: 自动与 Nekro Agent 当前使用的语言模型（LLM）保持一致，无需为插件单独配置模型，实现无缝集成。
+- **⚙️ 高度可配**:
+  - 支持自定义 `Agent ID`，为不同的 Agent 或场景隔离记忆。
+  - 支持配置不同的 `Embedding` 模型。
+  - **解决了维度不匹配问题**：允许显式设置 `Embedding` 维度，完美支持 `text-embedding-004` (768维) 等模型。
+- **💾 多种后端**: 支持 `Qdrant`, `Chroma` 等多种向量数据库作为记忆存储后端。
 
 ## 🚀 快速开始
 
-### 1. 使用模板创建仓库
-
-1. 点击本仓库页面上的 "Use this template" 按钮
-2. 输入你的插件仓库名称，推荐命名格式：`nekro-plugin-[你的插件包名]`
-3. 选择公开或私有仓库
-4. 点击 "Create repository from template" 创建你的插件仓库
-
-### 2. 克隆你的插件仓库
+### 1. 克隆本仓库
 
 ```bash
-git clone https://github.com/你的用户名/你的插件仓库名.git
-cd 你的插件仓库名
+git clone https://github.com/johntime2005/nekro-plugin-memory.git
+cd nekro-plugin-memory
 ```
 
-### 3. 安装依赖
+### 2. 安装依赖
+
+本项目使用 [Poetry](https://python-poetry.org/) 进行依赖管理。
 
 ```bash
 # 安装 poetry 包管理工具
 pip install poetry
 
-# 设置虚拟环境目录在项目下
+# 设置虚拟环境目录在项目下 (可选)
 poetry config virtualenvs.in-project true
 
 # 安装所有依赖
 poetry install
 ```
 
-## 📝 插件开发指南
+## 📝 插件配置
 
-### 插件结构
-
-一个标准的 NekroAgent 插件需要在 `__init__.py` 中提供一个 `plugin` 实例，这是插件的核心，用于注册插件功能和配置。
+插件加载后，你可以在 Nekro Agent 的配置页面中找到以下参数进行调整：
 
 ```python
-# 示例插件结构
-plugin = NekroPlugin(
-    name="你的插件名称",  # 插件显示名称
-    module_name="plugin_module_name",  # 插件模块名 (在NekroAI社区需唯一)
-    description="插件描述",  # 插件功能简介
-    version="1.0.0",  # 插件版本
-    author="你的名字",  # 作者信息
-    url="https://github.com/你的用户名/你的插件仓库名",  # 插件仓库链接
-)
-```
+class MemoryConfig(ConfigBase):
+    """长期记忆插件配置"""
 
-### 开发功能
-
-1. **配置插件参数**：使用 `@plugin.mount_config()` 装饰器创建可配置参数
-
-```python
-@plugin.mount_config()
-class MyPluginConfig(ConfigBase):
-    """插件配置说明"""
-    
-    API_KEY: str = Field(
-        default="",
-        title="API密钥",
-        description="第三方服务的API密钥",
+    agent_id: str = Field(
+        default="nekro-agent",
+        title="Agent ID",
+        description="用于隔离不同 Agent 记忆的唯一标识符。",
+    )
+    embedding_model: str = Field(
+        default="text-embedding-3-large",
+        title="Embedding 模型",
+        description="用于将文本向量化的嵌入模型。",
+    )
+    embedding_dims: int = Field(
+        default=1536,
+        title="Embedding 维度",
+        description="指定嵌入模型的输出维度。例如，对于 text-embedding-004 使用 768，对于 text-embedding-3-large 使用 1536 或 3072。",
+    )
+    vector_store_provider: str = Field(
+        default="qdrant",
+        title="向量数据库提供商",
+        description="支持 'qdrant', 'chroma' 等。",
+    )
+    qdrant_host: str = Field(
+        default="localhost",
+        title="Qdrant 主机地址",
+        description="如果使用 Qdrant，请指定其主机地址。",
+    )
+    qdrant_port: int = Field(
+        default=6333,
+        title="Qdrant 端口",
+        description="如果使用 Qdrant，请指定其端口。",
     )
 ```
 
-2. **添加沙盒方法**：使用 `@plugin.mount_sandbox_method()` 添加AI可调用的函数
+## 🛠️ 可用函数 (Agent 可调用)
 
-```python
-@plugin.mount_sandbox_method(SandboxMethodType.AGENT, name="函数名称", description="函数功能描述")
-async def my_function(_ctx: AgentCtx, param1: str) -> str:
-    """实现插件功能的具体逻辑"""
-    return f"处理结果: {param1}"
-```
+Agent 可以通过以下函数来操作记忆库：
 
-3. **资源清理**：使用 `@plugin.mount_cleanup_method()` 添加资源清理函数
-
-```python
-@plugin.mount_cleanup_method()
-async def clean_up():
-    """清理资源，如数据库连接等"""
-    logger.info("资源已清理")
-```
-
-## 📦 插件发布
-
-完成开发后，你可以：
-
-1. 提交到 GitHub 仓库
-2. 发布到 NekroAI 云社区共享给所有用户
-
-## 🔍 更多资源
-
-- [NekroAgent 官方文档](https://doc.nekro.ai/)
-- [插件开发详细指南](https://doc.nekro.ai/docs/04_plugin_dev/intro.html)
-- [社区交流群](https://qm.qq.com/q/hJlRwD17Ae)：636925153
+- `add_memory(data: str, metadata: dict = None)`
+  - **描述**: 【核心功能】向记忆库中添加一条新的信息。当需要记录关键事实、用户偏好或对话要点以备将来使用时调用此方法。
+- `search_memory(query: str, limit: int = 5)`
+  - **描述**: 【核心功能】根据问题或关键词在记忆库中进行智能搜索。当需要从过去的记忆中寻找相关信息以回答问题或进行联想时调用。
+- `get_all_memories()`
+  - **描述**: 【辅助功能】获取所有存储的记忆。用于调试或需要完整回顾所有记忆的场景。请注意，数据量可能很大。
+- `delete_memory(memory_id: str)`
+  - **描述**: 【管理功能】根据ID删除一条指定的记忆。用于修正错误的记忆或移除不再需要的信息。
 
 ## 📄 许可证
 

@@ -11,6 +11,9 @@ repository = "https://github.com/KroMiose/nekro-plugin-template"
 [tool.poetry.dependencies]
 python = ">=3.9,<3.12"
 nekro-agent = ">=1.0.0"
+mem0 = "^0.2.0"
+pydantic-settings = "^2.3.4"
+loguru = "^0.7.2"
 
 
 [build-system]
