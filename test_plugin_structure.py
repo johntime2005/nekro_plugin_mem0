@@ -10,12 +10,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 try:
     # 尝试导入插件包
-    import nekro_plugin_memory
+    import mem0_memory
     print("✅ 插件包导入成功")
 
     # 检查插件实例
-    if hasattr(nekro_plugin_memory, 'plugin'):
-        plugin = nekro_plugin_memory.plugin
+    if hasattr(mem0_memory, 'plugin'):
+        plugin = mem0_memory.plugin
         print(f"✅ 插件实例存在: {plugin.name}")
         print(f"   模块名: {plugin.module_name}")
         print(f"   版本: {plugin.version}")
@@ -24,12 +24,12 @@ try:
         print("❌ 插件实例不存在")
 
     # 检查插件方法
-    if hasattr(nekro_plugin_memory, 'add_memory'):
+    if hasattr(mem0_memory, 'add_memory'):
         print("✅ add_memory 方法存在")
     else:
         print("❌ add_memory 方法不存在")
 
-    if hasattr(nekro_plugin_memory, 'search_memory'):
+    if hasattr(mem0_memory, 'search_memory'):
         print("✅ search_memory 方法存在")
     else:
         print("❌ search_memory 方法不存在")

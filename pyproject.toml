@@ -4,7 +4,7 @@ version = "1.1.0"
 description = "Nekro Agent 长期记忆插件，基于 mem0 实现"
 authors = ["johntime2005 <johntime2005@github.com>"]
 readme = "README.md"
-packages = [{include = "nekro_plugin_memory"}]
+packages = [{include = "mem0_memory"}]
 repository = "https://github.com/johntime2005/nekro-plugin-memory"
 
 
