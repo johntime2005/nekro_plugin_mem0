@@ -10,7 +10,7 @@ from pydantic import Field
 
 plugin = NekroPlugin(
     name="记忆插件",
-    module_name="nekro-plugin-memory",
+    module_name="nekro_plugin_memory",
     description="为Nekro Agent提供基于 mem0 v1.0 的长期记忆能力",
     version="1.2.0",
     author="johntime2005",
