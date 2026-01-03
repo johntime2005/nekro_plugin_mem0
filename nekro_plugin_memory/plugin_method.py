@@ -86,3 +86,30 @@ async def search_memory(
         threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD,
     )
     return format_search_output(results)
+
+
+@plugin.mount_prompt_inject_method(
+    name="memory_layer_hint",
+    description="为LLM注入可用的长期记忆能力提示，包含跨用户/Agent/会话的存取方式",
+)
+async def inject_memory_prompt(_ctx: AgentCtx) -> str:
+    config = get_memory_config()
+    lines = [
+        "你可以使用记忆插件在多个会话间维持用户/Agent的长期记忆。",
+        "写入记忆：调用 add_memory(memory, user_id, agent_id?, run_id?, metadata?)。metadata 可带标签帮助分类。",
+        "检索记忆：调用 search_memory(query, user_id?, agent_id?, run_id?, limit?)，默认会结合会话隔离与相似度阈值。",
+        f"当前相似度阈值: {config.MEMORY_SEARCH_SCORE_THRESHOLD}。",
+    ]
+
+    if config.ENABLE_AGENT_SCOPE:
+        lines.append("已启用 Agent 级记忆：同一 Agent 可在多会话间共享知识。")
+    else:
+        lines.append("未启用 Agent 级记忆：记忆主要按用户/会话维度隔离。")
+
+    if config.SESSION_ISOLATION:
+        lines.append("已启用会话隔离：检索时优先限定 run_id（会话层），确保结果贴合当前对话。")
+    else:
+        lines.append("已关闭会话隔离：检索会聚合用户/Agent 级记忆，便于跨会话互通。")
+
+    lines.append("run_id 会被安全编码存储，可放心跨实例迁移。")
+    return "\n".join(lines)

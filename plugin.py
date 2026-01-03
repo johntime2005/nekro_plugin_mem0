@@ -3,15 +3,37 @@
 """
 
 from typing import Optional
+from nekro_agent.api.plugin import ExtraField
 from nekro_agent.services.plugin.base import ConfigBase, NekroPlugin
 from pydantic import Field
 
 
+plugin = NekroPlugin(
+    name="记忆插件",
+    module_name="nekro_plugin_memory",
+    description="为Nekro Agent提供基于 mem0 v1.0 的长期记忆能力",
+    version="1.2.0",
+    author="johntime2005",
+    url="https://github.com/johntime2005/nekro-plugin-memory",
+)
+
+
+@plugin.mount_config()
 class PluginConfig(ConfigBase):
     """记忆插件配置"""
 
-    OPENAI_API_KEY: str = Field(default="", title="OpenAI API Key", description="用于LLM的OpenAI API密钥")
-    MEM0_API_KEY: str = Field(default="", title="Mem0 API Key", description="Mem0服务的API密钥")
+    OPENAI_API_KEY: str = Field(
+        default="",
+        title="OpenAI API Key",
+        description="用于LLM的OpenAI API密钥",
+        json_schema_extra=ExtraField(is_secret=True, load_to_sysenv=True, load_sysenv_as="OPENAI_API_KEY").model_dump(),
+    )
+    MEM0_API_KEY: str = Field(
+        default="",
+        title="Mem0 API Key",
+        description="Mem0服务的API密钥（留空将使用本地向量库）",
+        json_schema_extra=ExtraField(is_secret=True, load_to_sysenv=True, load_sysenv_as="MEM0_API_KEY").model_dump(),
+    )
     MEM0_BASE_URL: str = Field(default="", title="Mem0 Base URL", description="Mem0服务的基础URL（可选）")
 
     VECTOR_DB: str = Field(default="qdrant", title="向量数据库", description="使用的向量数据库类型")
