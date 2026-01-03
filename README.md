@@ -11,7 +11,8 @@
   - 支持自定义 `Agent ID`，为不同的 Agent 或场景隔离记忆。
   - 支持配置不同的 `Embedding` 模型。
   - **解决了维度不匹配问题**：允许显式设置 `Embedding` 维度，完美支持 `text-embedding-004` (768维) 等模型。
-- **💾 多种后端**: 支持 `Qdrant`, `Chroma` 等多种向量数据库作为记忆存储后端。
+- **🧩 多层记忆互通**：基于 mem0 v1.0 的多层记忆架构，支持在同一个用户、Agent 与会话（run）之间同步写入，让助理能在多会话间共享记忆，同时仍可按需启用会话级隔离。
+- **💾 多种后端**: 支持 `Qdrant`, `Chroma`, `Redis` 等多种向量数据库作为记忆存储后端，Redis 方案便于 Docker 部署时通过数据卷持久化和迁移。
 
 ## 🚀 快速开始
 
@@ -76,6 +77,11 @@ class MemoryConfig(ConfigBase):
         description="如果使用 Qdrant，请指定其端口。",
     )
 ```
+
+- `COLLECTION_NAME`：控制向量库集合名称，便于与既有实例隔离/共享。
+- `ENABLE_AGENT_SCOPE`：开启后会为同一 Agent 写入一份可跨会话复用的记忆；关闭则仅按用户/会话维度写入。
+- `SESSION_ISOLATION`：为 `True` 时搜索会优先使用会话 `run_id` 限定结果；设为 `False` 则基于用户/Agent 级别跨会话聚合记忆，满足多轮互通。
+- `REDIS_URL`：当 `VECTOR_DB=redis` 时生效，形如 `redis://redis:6379/0`；生产环境请将 Redis 数据目录挂载卷以获得持久化，并可通过更换 URL 在服务器间迁移。
 
 ## 🛠️ 可用函数 (Agent 可调用)
 
