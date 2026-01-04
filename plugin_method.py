@@ -43,11 +43,30 @@ def _build_layer_order(scope, layers: Optional[List[str]], preferred: Optional[s
                 normalized_layers.append(canonical_name)
         if normalized_layers:
             return normalized_layers
+
+    # Derive the default order once so we can both validate `preferred`
+    # and provide a sensible fallback when it is invalid.
+    default_order = scope.default_layer_order(enable_session_layer=session_enabled)
+
     if preferred:
-        return [preferred]
-    return scope.default_layer_order(enable_session_layer=session_enabled)
+        # Normalize and validate preferred layer name against known layers.
+        normalized_preferred = preferred.strip()
+        normalized_lower = normalized_preferred.lower()
+        for layer_name in default_order:
+            if layer_name.lower() == normalized_lower:
+                # Use the canonical layer name from default_order.
+                return [layer_name]
 
+        # If we reach here, the preferred layer is not recognized.
+        # Log and fall back to the default order instead of returning
+        # an invalid layer that would be silently skipped later.
+        logger.warning(
+            "Invalid preferred memory layer '%s' provided; falling back to default layer order %s",
+            preferred,
+            default_order,
+        )
 
+    return default_order
 def _annotate_results(raw_results: Any, layer: str, seen_ids: Set[str]) -> List[Dict[str, Any]]:
     annotated: List[Dict[str, Any]] = []
     for item in normalize_results(raw_results):
