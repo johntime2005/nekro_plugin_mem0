@@ -77,5 +77,5 @@ _memory_config: Optional[PluginConfig] = None
 def get_memory_config() -> PluginConfig:
     global _memory_config
     if _memory_config is None:
-        _memory_config = PluginConfig()
+       _memory_config = plugin.get_config(PluginConfig)
     return _memory_config
