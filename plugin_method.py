@@ -70,6 +70,12 @@ async def add_memory(
     run_id: Optional[str] = None,
     scope_level: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """
+    添加记忆。
+
+    示例：
+        await add_memory(_ctx, "喜欢科幻电影", user_id="user-1", metadata={"TYPE": "PREFERENCES"}, scope_level="persona")
+    """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
     if client is None:
@@ -111,6 +117,12 @@ async def search_memory(
     layers: Optional[List[str]] = None,
     limit: int = 5,
 ) -> Dict[str, Any]:
+    """
+    按层级搜索记忆。
+
+    示例：
+        await search_memory(_ctx, "喜欢吃什么", user_id="user-1", layers=["conversation", "persona", "global"], limit=8)
+    """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
     if client is None:
@@ -165,6 +177,12 @@ async def get_all_memory(
     layers: Optional[List[str]] = None,
     tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    """
+    获取指定层级的全部记忆。
+
+    示例：
+        await get_all_memory(_ctx, user_id="user-1", tags=["PREFERENCES"], layers=["persona", "global"])
+    """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
     if client is None:
@@ -205,6 +223,12 @@ async def update_memory(
     memory_id: str,
     new_memory: str,
 ) -> Dict[str, Any]:
+    """
+    更新指定记忆内容。
+
+    示例：
+        await update_memory(_ctx, memory_id="abc123", new_memory="改为喜欢爵士乐")
+    """
     client = await get_mem0_client()
     if client is None:
         return {"ok": False, "error": "mem0 client init failed"}
@@ -226,6 +250,12 @@ async def delete_memory(
     _ctx: AgentCtx,
     memory_id: str,
 ) -> Dict[str, Any]:
+    """
+    删除单条记忆。
+
+    示例：
+        await delete_memory(_ctx, memory_id="abc123")
+    """
     client = await get_mem0_client()
     if client is None:
         return {"ok": False, "error": "mem0 client init failed"}
@@ -251,6 +281,12 @@ async def delete_all_memory(
     scope_level: Optional[str] = None,
     layers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    """
+    按层级批量删除记忆。
+
+    示例：
+        await delete_all_memory(_ctx, user_id="user-1", layers=["conversation", "persona"])
+    """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
     if client is None:
@@ -294,6 +330,12 @@ async def get_memory_history(
     _ctx: AgentCtx,
     memory_id: str,
 ) -> Dict[str, Any]:
+    """
+    查看记忆历史版本。
+
+    示例：
+        await get_memory_history(_ctx, memory_id="abc123")
+    """
     client = await get_mem0_client()
     if client is None:
         return {"ok": False, "error": "mem0 client init failed"}
@@ -318,7 +360,12 @@ async def memory_command(
     action: str,
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """统一命令入口，便于上层做网页/后台交互调用。"""
+    """
+    统一命令入口，便于上层做网页/后台交互调用。
+
+    示例：
+        await memory_command(_ctx, "search", {"query": "最喜欢的颜色", "user_id": "user-1"})
+    """
     payload = payload or {}
     action = (action or "").lower()
 
