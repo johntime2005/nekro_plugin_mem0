@@ -17,6 +17,11 @@ def _normalize_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return results or []
 
 
+def normalize_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """公开的结果归一化，供外部复用。"""
+    return _normalize_results(results)
+
+
 def _filter_by_tags(results: List[Dict[str, Any]], tags: List[str]) -> List[Dict[str, Any]]:
     if not tags:
         return results
@@ -44,10 +49,12 @@ def _format_memory_line(item: Dict[str, Any]) -> str:
     text = item.get("memory") or item.get("data") or item.get("content") or ""
     score = item.get("score")
     metadata = item.get("metadata") or {}
+    layer = item.get("layer") or item.get("scope_level")
     tag = metadata.get("TYPE")
     tag_part = f"[{tag}]" if tag else ""
+    layer_part = f"[{layer}]" if layer else ""
     score_part = f"(score={score:.3f})" if isinstance(score, (int, float)) else ""
-    return f"- {memory_id} {tag_part}{score_part} {text}".strip()
+    return f"- {memory_id} {tag_part}{layer_part}{score_part} {text}".strip()
 
 
 def _format_memory_list(results: List[Dict[str, Any]]) -> str:

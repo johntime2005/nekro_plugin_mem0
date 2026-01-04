@@ -4,7 +4,7 @@
 
 import base64
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core import logger
@@ -33,9 +33,69 @@ class MemoryScope:
     user_id: Optional[str]
     agent_id: Optional[str]
     run_id: Optional[str]
+    preset_title: Optional[str] = None
 
     def has_scope(self) -> bool:
         return any([self.user_id, self.agent_id, self.run_id])
+
+    @property
+    def persona_id(self) -> Optional[str]:
+        """别名：agent_id 即人设ID。"""
+        return self.agent_id
+
+    def available_layers(self) -> dict:
+        return {
+            "conversation": bool(self.run_id),
+            "persona": bool(self.agent_id),
+            "global": bool(self.user_id),
+        }
+
+    def _normalize_layer(self, layer: str) -> Optional[str]:
+        mapping = {
+            "conversation": "conversation",
+            "session": "conversation",
+            "run": "conversation",
+            "persona": "persona",
+            "preset": "persona",
+            "agent": "persona",
+            "global": "global",
+            "user": "global",
+        }
+        return mapping.get((layer or "").lower())
+
+    def layer_ids(self, layer: str) -> Optional[dict]:
+        normalized = self._normalize_layer(layer)
+        if normalized == "conversation" and self.run_id:
+            return {"layer": "conversation", "user_id": None, "agent_id": None, "run_id": self.run_id}
+        if normalized == "persona" and self.agent_id:
+            return {"layer": "persona", "user_id": None, "agent_id": self.agent_id, "run_id": None}
+        if normalized == "global" and self.user_id:
+            return {"layer": "global", "user_id": self.user_id, "agent_id": None, "run_id": None}
+        return None
+
+    def default_layer_order(self, enable_session_layer: bool = True) -> List[str]:
+        order: List[str] = []
+        if enable_session_layer and self.run_id:
+            order.append("conversation")
+        if self.agent_id:
+            order.append("persona")
+        if self.user_id:
+            order.append("global")
+        if not order and self.run_id:
+            # 即便关闭会话隔离，仍可在缺省场景下回退到对话层，避免无层级可用
+            order.append("conversation")
+        return order
+
+    def pick_layer(self, preferred: Optional[str], enable_session_layer: bool = True) -> Optional[str]:
+        """选择最合适的层级，优先使用显式指定，其次按默认优先级。"""
+        if preferred:
+            normalized = self._normalize_layer(preferred)
+            if normalized and self.layer_ids(normalized):
+                return normalized
+        for layer in self.default_layer_order(enable_session_layer=enable_session_layer):
+            if self.layer_ids(layer):
+                return layer
+        return None
 
 
 def resolve_memory_scope(
@@ -43,15 +103,39 @@ def resolve_memory_scope(
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    persona_id: Optional[str] = None,
 ) -> MemoryScope:
-    resolved_user_id = _normalize(user_id) or _normalize(getattr(ctx, "user_id", None))
-    resolved_agent_id = _normalize(agent_id) or _normalize(getattr(ctx, "agent_id", None) or getattr(ctx, "bot_id", None))
-    resolved_run_id = _normalize(run_id) or _normalize(getattr(ctx, "chat_key", None) or getattr(ctx, "session_id", None))
+    def _safe_getattr(obj, name: str) -> Optional[str]:
+        try:
+            return getattr(obj, name, None)
+        except Exception:
+            return None
 
-    if resolved_run_id:
-        resolved_run_id = get_preset_id(resolved_run_id)
+    resolved_user_id = _normalize(user_id)
+    if not resolved_user_id:
+        db_user = _safe_getattr(ctx, "db_user")
+        user_unique_id = _safe_getattr(db_user, "unique_id") if db_user else None
+        resolved_user_id = (
+            _normalize(user_unique_id)
+            or _normalize(_safe_getattr(ctx, "user_id", None))
+            or _normalize(_safe_getattr(ctx, "channel_id", None))
+        )
 
-    return MemoryScope(user_id=resolved_user_id, agent_id=resolved_agent_id, run_id=resolved_run_id)
+    resolved_agent_id = _normalize(agent_id) or _normalize(persona_id) or _normalize(_safe_getattr(ctx, "agent_id", None) or _safe_getattr(ctx, "bot_id", None))
+    preset_title = None
+    if not resolved_agent_id:
+        db_chat_channel = _safe_getattr(ctx, "db_chat_channel")
+        preset_id = _safe_getattr(db_chat_channel, "preset_id") if db_chat_channel else None
+        if preset_id is not None:
+            resolved_agent_id = f"preset:{preset_id}"
+        elif db_chat_channel is not None:
+            resolved_agent_id = "preset:default"
+        preset_title = _safe_getattr(db_chat_channel, "channel_name") if db_chat_channel else None
+
+    resolved_run_source = _normalize(run_id) or _normalize(_safe_getattr(ctx, "chat_key", None) or _safe_getattr(ctx, "session_id", None))
+    resolved_run_id = get_preset_id(resolved_run_source) if resolved_run_source else None
+
+    return MemoryScope(user_id=resolved_user_id, agent_id=resolved_agent_id, run_id=resolved_run_id, preset_title=preset_title)
 
 
 def get_model_group_info(model_name: str, expected_type: Optional[str] = None) -> ModelConfigGroup:

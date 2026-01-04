@@ -2,7 +2,7 @@
 插件方法
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core import logger
 from nekro_agent.services.plugin.base import SandboxMethodType
@@ -12,11 +12,43 @@ from .mem0_output_formatter import (
     format_history_output,
     format_history_text,
     format_search_output,
+    normalize_results,
     _format_memory_list,
 )
 from .mem0_utils import get_mem0_client
 from .plugin import get_memory_config, plugin
 from .utils import resolve_memory_scope
+
+
+def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
+    """提取统一的记忆ID，便于跨层去重。"""
+    for key in ("id", "memory_id"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _build_layer_order(scope, layers: Optional[List[str]], preferred: Optional[str], session_enabled: bool) -> List[str]:
+    if layers:
+        return layers
+    if preferred:
+        return [preferred]
+    return scope.default_layer_order(enable_session_layer=session_enabled)
+
+
+def _annotate_results(raw_results: Any, layer: str, seen_ids: Set[str]) -> List[Dict[str, Any]]:
+    annotated: List[Dict[str, Any]] = []
+    for item in normalize_results(raw_results):
+        record = dict(item)
+        record["layer"] = layer
+        memory_id = _memory_identifier(record)
+        if memory_id and memory_id in seen_ids:
+            continue
+        if memory_id:
+            seen_ids.add(memory_id)
+        annotated.append(record)
+    return annotated
 
 
 @plugin.mount_init_method()
@@ -36,6 +68,7 @@ async def add_memory(
     metadata: Optional[Dict[str, Any]] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    scope_level: Optional[str] = None,
 ) -> Dict[str, Any]:
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -46,14 +79,21 @@ async def add_memory(
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法写入记忆"}
 
+    target_layer = scope.pick_layer(preferred=scope_level, enable_session_layer=plugin_config.SESSION_ISOLATION)
+    layer_ids = scope.layer_ids(target_layer or "")
+    if layer_ids is None:
+        return {"ok": False, "error": "未能确定可用的记忆层级，请提供 scope_level 或 user_id/agent_id/run_id"}
+
     result = client.add(
         memory,
-        user_id=scope.user_id,
-        agent_id=scope.agent_id if plugin_config.ENABLE_AGENT_SCOPE else None,
-        run_id=scope.run_id,
+        user_id=layer_ids["user_id"] if plugin_config.ENABLE_AGENT_SCOPE or target_layer == "global" else None,
+        agent_id=layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or target_layer == "persona" else None,
+        run_id=layer_ids["run_id"],
         metadata=metadata or {},
     )
-    return format_add_output(result)
+    formatted = format_add_output(result)
+    formatted["layer"] = layer_ids["layer"]
+    return formatted
 
 
 @plugin.mount_sandbox_method(
@@ -67,6 +107,8 @@ async def search_memory(
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    scope_level: Optional[str] = None,
+    layers: Optional[List[str]] = None,
     limit: int = 5,
 ) -> Dict[str, Any]:
     plugin_config = get_memory_config()
@@ -76,23 +118,36 @@ async def search_memory(
 
     scope = resolve_memory_scope(_ctx, user_id=user_id, agent_id=agent_id, run_id=run_id)
     if not scope.has_scope():
-        return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法搜索记忆"}
+        return {"ok": False, "error": "缺少可用的 user_id/agent_id/run_id，无法搜索记忆"}
 
-    search_run_id = scope.run_id if plugin_config.SESSION_ISOLATION or not (scope.user_id or scope.agent_id) else None
-    search_agent_id = scope.agent_id if plugin_config.ENABLE_AGENT_SCOPE else None
+    layer_order = _build_layer_order(scope, layers=layers, preferred=scope_level, session_enabled=plugin_config.SESSION_ISOLATION)
+    if not layer_order:
+        return {"ok": False, "error": "未找到可搜索的层级"}
 
-    if not any([scope.user_id, search_agent_id, search_run_id]):
-        return {"ok": False, "error": "缺少可用的 user_id/agent_id/run_id"}
+    merged_results: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+    for layer in layer_order:
+        layer_ids = scope.layer_ids(layer)
+        if not layer_ids:
+            continue
+        search_run_id = layer_ids["run_id"] if plugin_config.SESSION_ISOLATION or layer_ids["layer"] == "conversation" else None
+        search_agent_id = layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None
+        search_user_id = layer_ids["user_id"] if layer_ids["layer"] == "global" else None
 
-    raw_results = client.search(
-        query,
-        user_id=scope.user_id,
-        agent_id=search_agent_id,
-        run_id=search_run_id,
-        limit=limit,
-        threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD,
-    )
-    formatted = format_search_output(raw_results, threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD)
+        raw_results = client.search(
+            query,
+            user_id=search_user_id,
+            agent_id=search_agent_id,
+            run_id=search_run_id,
+            limit=limit,
+            threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD,
+        )
+        merged_results.extend(_annotate_results(raw_results, layer_ids["layer"], seen_ids))
+
+    merged_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    merged_results = merged_results[:limit]
+
+    formatted = format_search_output(merged_results, threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD)
     return {"ok": True, **formatted}
 
 
@@ -106,6 +161,8 @@ async def get_all_memory(
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    scope_level: Optional[str] = None,
+    layers: Optional[List[str]] = None,
     tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     plugin_config = get_memory_config()
@@ -117,12 +174,24 @@ async def get_all_memory(
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法获取记忆"}
 
-    results = client.get_all(
-        user_id=scope.user_id,
-        agent_id=scope.agent_id if plugin_config.ENABLE_AGENT_SCOPE else None,
-        run_id=scope.run_id if plugin_config.SESSION_ISOLATION else None,
-    )
-    formatted = format_get_all_output(results, tags=tags)
+    layer_order = _build_layer_order(scope, layers=layers, preferred=scope_level, session_enabled=plugin_config.SESSION_ISOLATION)
+    if not layer_order:
+        return {"ok": False, "error": "未找到可获取的层级"}
+
+    merged_results: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+    for layer in layer_order:
+        layer_ids = scope.layer_ids(layer)
+        if not layer_ids:
+            continue
+        raw = client.get_all(
+            user_id=layer_ids["user_id"] if layer_ids["layer"] == "global" else None,
+            agent_id=layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None,
+            run_id=layer_ids["run_id"] if layer_ids["layer"] == "conversation" else None,
+        )
+        merged_results.extend(_annotate_results(raw, layer_ids["layer"], seen_ids))
+
+    formatted = format_get_all_output(merged_results, tags=tags)
     return {"ok": True, **formatted}
 
 
@@ -179,6 +248,8 @@ async def delete_all_memory(
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    scope_level: Optional[str] = None,
+    layers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -189,16 +260,29 @@ async def delete_all_memory(
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法删除记忆"}
 
+    layer_order = _build_layer_order(scope, layers=layers, preferred=scope_level, session_enabled=plugin_config.SESSION_ISOLATION)
+    if not layer_order:
+        return {"ok": False, "error": "未找到可删除的层级"}
+
+    deleted_layers: List[str] = []
     try:
-        client.delete_all(
-            user_id=scope.user_id,
-            agent_id=scope.agent_id if plugin_config.ENABLE_AGENT_SCOPE else None,
-            run_id=scope.run_id if plugin_config.SESSION_ISOLATION else None,
-        )
+        for layer in layer_order:
+            layer_ids = scope.layer_ids(layer)
+            if not layer_ids:
+                continue
+            client.delete_all(
+                user_id=layer_ids["user_id"] if layer_ids["layer"] == "global" else None,
+                agent_id=layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None,
+                run_id=layer_ids["run_id"] if layer_ids["layer"] == "conversation" else None,
+            )
+            deleted_layers.append(layer_ids["layer"])
     except Exception as exc:  # pragma: no cover
         logger.error(f"删除全部记忆失败: {exc}")
         return {"ok": False, "error": str(exc)}
-    return {"ok": True, "message": "已删除指定作用域记忆"}
+
+    if not deleted_layers:
+        return {"ok": False, "error": "未能匹配任何可删除的层级"}
+    return {"ok": True, "message": f"已删除指定作用域记忆：{', '.join(deleted_layers)}"}
 
 
 @plugin.mount_sandbox_method(
@@ -246,6 +330,7 @@ async def memory_command(
             metadata=payload.get("metadata"),
             agent_id=payload.get("agent_id"),
             run_id=payload.get("run_id"),
+            scope_level=payload.get("scope_level"),
         )
     if action == "search":
         resp = await search_memory(
@@ -254,6 +339,8 @@ async def memory_command(
             user_id=payload.get("user_id"),
             agent_id=payload.get("agent_id"),
             run_id=payload.get("run_id"),
+            scope_level=payload.get("scope_level"),
+            layers=payload.get("layers"),
             limit=payload.get("limit", 5),
         )
         if resp.get("ok"):
@@ -265,6 +352,8 @@ async def memory_command(
             user_id=payload.get("user_id"),
             agent_id=payload.get("agent_id"),
             run_id=payload.get("run_id"),
+            scope_level=payload.get("scope_level"),
+            layers=payload.get("layers"),
             tags=payload.get("tags"),
         )
         return resp
@@ -282,6 +371,8 @@ async def memory_command(
             user_id=payload.get("user_id"),
             agent_id=payload.get("agent_id"),
             run_id=payload.get("run_id"),
+            scope_level=payload.get("scope_level"),
+            layers=payload.get("layers"),
         )
     if action == "history":
         return await get_memory_history(_ctx, memory_id=payload.get("memory_id", ""))
@@ -295,17 +386,22 @@ async def memory_command(
 )
 async def inject_memory_prompt(_ctx: AgentCtx) -> str:
     config = get_memory_config()
+    scope = resolve_memory_scope(_ctx)
+    layer_order = scope.default_layer_order(enable_session_layer=config.SESSION_ISOLATION)
+    available_layers = ", ".join(layer_order) if layer_order else "无可用层级"
     lines = [
         "你可以使用记忆插件在多个会话间维持用户/Agent的长期记忆。",
-        "写入记忆：调用 add_memory(memory, user_id, agent_id?, run_id?, metadata?)。metadata 可带标签帮助分类。",
-        "检索记忆：调用 search_memory(query, user_id?, agent_id?, run_id?, limit?)，默认会结合会话隔离与相似度阈值。",
+        "写入记忆：调用 add_memory(memory, user_id, agent_id?, run_id?, metadata?, scope_level?)，scope_level 可取 conversation/persona/global。",
+        "检索记忆：调用 search_memory(query, user_id?, agent_id?, run_id?, scope_level?/layers?, limit?)，默认按层级顺序搜索。",
         "更新记忆：调用 update_memory(memory_id, new_memory)，用于修订已存知识。",
         "删除记忆：调用 delete_memory(memory_id) 删除单条，或 delete_all_memory(user_id?, agent_id?, run_id?) 清空作用域。",
         f"当前相似度阈值: {config.MEMORY_SEARCH_SCORE_THRESHOLD}。",
+        f"可用层级顺序: {available_layers}。",
+        "层级选择建议：对话上下文或短暂状态 -> conversation；与当前人设/角色绑定的习惯与设定 -> persona；与用户身份关联的长期资料 -> global。",
     ]
 
     if config.ENABLE_AGENT_SCOPE:
-        lines.append("已启用 Agent 级记忆：同一 Agent 可在多会话间共享知识。")
+        lines.append("已启用 Agent/人设 级记忆：同一人设可在多会话间共享知识，不同人设彼此隔离。")
     else:
         lines.append("未启用 Agent 级记忆：记忆主要按用户/会话维度隔离。")
 
@@ -313,6 +409,13 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         lines.append("已启用会话隔离：检索时优先限定 run_id（会话层），确保结果贴合当前对话。")
     else:
         lines.append("已关闭会话隔离：检索会聚合用户/Agent 级记忆，便于跨会话互通。")
+
+    if scope.run_id:
+        lines.append(f"对话层 run_id: {scope.run_id}")
+    if scope.persona_id:
+        lines.append(f"人设层 agent_id: {scope.persona_id}")
+    if scope.user_id:
+        lines.append(f"全局层 user_id: {scope.user_id}")
 
     lines.append("run_id 会被安全编码存储，可放心跨实例迁移。")
     return "\n".join(lines)
