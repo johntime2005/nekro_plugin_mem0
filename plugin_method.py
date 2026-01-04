@@ -2,9 +2,13 @@
 插件方法
 """
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
+from nonebot.adapters.onebot.v11 import Message, MessageEvent
+from nonebot.matcher import Matcher
+from nonebot.params import CommandArg
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core import logger
+from nekro_agent.adapters.onebot_v11.matchers.command import finish_with, on_command
 from nekro_agent.services.plugin.base import SandboxMethodType
 from .mem0_output_formatter import (
     format_add_output,
@@ -17,7 +21,7 @@ from .mem0_output_formatter import (
 )
 from .mem0_utils import get_mem0_client
 from .plugin import get_memory_config, plugin
-from .utils import resolve_memory_scope
+from .utils import MemoryScope, get_preset_id, resolve_memory_scope
 
 
 def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
@@ -79,6 +83,79 @@ def _annotate_results(raw_results: Any, layer: str, seen_ids: Set[str]) -> List[
             seen_ids.add(memory_id)
         annotated.append(record)
     return annotated
+
+
+def _normalize_cli_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _split_tokens(tokens: List[str]) -> Tuple[List[str], Dict[str, str]]:
+    positional: List[str] = []
+    kv: Dict[str, str] = {}
+    for token in tokens:
+        if "=" in token:
+            key, val = token.split("=", 1)
+            kv[key.strip().lower()] = val.strip()
+        else:
+            if token:
+                positional.append(token)
+    return positional, kv
+
+
+def _parse_layers(layer_value: Optional[str]) -> Optional[List[str]]:
+    if not layer_value:
+        return None
+    normalized = layer_value.strip().lower()
+    if normalized in ("*", "all", "any", "默认", "全部"):
+        return None
+    parts = [part.strip() for part in layer_value.replace(",", " ").split() if part.strip()]
+    return parts or None
+
+
+def _parse_tags(tag_value: Optional[str]) -> Optional[List[str]]:
+    if not tag_value:
+        return None
+    if isinstance(tag_value, str):
+        parts = [p.strip() for p in tag_value.replace(",", " ").split() if p.strip()]
+        return parts or None
+    return None
+
+
+def _parse_metadata(options: Dict[str, str]) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
+    tag = options.get("tag") or options.get("type")
+    if tag:
+        metadata["TYPE"] = tag
+    for key, val in options.items():
+        if key.startswith("meta.") or key.startswith("meta_"):
+            meta_key = key.split(".", 1)[1] if "." in key else key.split("_", 1)[1]
+            if meta_key:
+                metadata[meta_key] = val
+    return metadata
+
+
+def _build_scope_from_event(event: MessageEvent, options: Dict[str, str]) -> MemoryScope:
+    user_id = _normalize_cli_value(options.get("user") or options.get("u") or getattr(event, "user_id", None))
+    # 如果需要人设/Agent隔离，可以通过 agent=xxx 传入；默认留空，与 sandbox 默认行为一致（优先会话/用户）
+    agent_id = _normalize_cli_value(options.get("agent") or options.get("persona") or options.get("preset"))
+    run_source = _normalize_cli_value(
+        options.get("run")
+        or options.get("session")
+        or options.get("chat")
+        or getattr(event, "group_id", None)
+        or getattr(event, "channel_id", None)
+        or getattr(event, "guild_id", None)
+        or getattr(event, "user_id", None)
+    )
+    run_id = get_preset_id(run_source) if run_source else None
+    return MemoryScope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+
+
+def _format_command_error(message: str) -> str:
+    return f"❌ {message}"
 
 
 @plugin.mount_init_method()
@@ -496,3 +573,243 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
 
     lines.append("run_id 会被安全编码存储，可放心跨实例迁移。")
     return "\n".join(lines)
+
+
+# ============ 聊天指令：/mem ===============
+
+MEMORY_HELP_TEXT = """🧠 记忆指令帮助
+用法示例：
+- mem list                     # 列出当前会话/用户的记忆
+- mem list layer=global        # 仅查看全局层
+- mem delete <memory_id>       # 删除单条
+- mem clear                    # 按默认层级依次清空
+- mem clear layer=conversation # 只清空会话层
+- mem history <memory_id>      # 查看历史
+- mem search <query>           # 语义搜索（默认按层级顺序）
+- mem add <文本> tag=TYPE      # 添加记忆，可选 layer=conversation/persona/global
+可选参数：user=xxx agent=xxx run=xxx layer=xxx tag=TYPE meta.xxx=val
+"""
+
+
+memory_command_entry = on_command("mem", aliases={"memory", "记忆"}, priority=5, block=True)
+
+
+async def _command_list_memory(scope: MemoryScope, layers: Optional[List[str]], tags: Optional[List[str]]) -> str:
+    plugin_config = get_memory_config()
+    client = await get_mem0_client()
+    if client is None:
+        return _format_command_error("mem0 client init failed，检查插件配置。")
+    if not scope.has_scope():
+        return _format_command_error("缺少 user_id/agent_id/run_id，无法列出记忆。")
+
+    layer_order = _build_layer_order(scope, layers=layers, preferred=None, session_enabled=plugin_config.SESSION_ISOLATION)
+    if not layer_order:
+        return _format_command_error("未找到可获取的层级。")
+
+    merged_results: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+    for layer in layer_order:
+        layer_ids = scope.layer_ids(layer)
+        if not layer_ids:
+            continue
+        raw = client.get_all(
+            user_id=layer_ids["user_id"] if layer_ids["layer"] == "global" else None,
+            agent_id=layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None,
+            run_id=layer_ids["run_id"] if layer_ids["layer"] == "conversation" else None,
+        )
+        merged_results.extend(_annotate_results(raw, layer_ids["layer"], seen_ids))
+
+    formatted = format_get_all_output(merged_results, tags=tags)
+    return "📒 记忆列表：\n" + (formatted.get("text") or "(无结果)")
+
+
+async def _command_delete_memory(memory_id: str) -> str:
+    client = await get_mem0_client()
+    if client is None:
+        return _format_command_error("mem0 client init failed，检查插件配置。")
+    try:
+        client.delete(memory_id)
+    except Exception as exc:  # pragma: no cover
+        logger.error(f"删除记忆失败: {exc}")
+        return _format_command_error(str(exc))
+    return f"🗑️ 已删除记忆 {memory_id}"
+
+
+async def _command_clear_memory(scope: MemoryScope, layers: Optional[List[str]]) -> str:
+    plugin_config = get_memory_config()
+    client = await get_mem0_client()
+    if client is None:
+        return _format_command_error("mem0 client init failed，检查插件配置。")
+    if not scope.has_scope():
+        return _format_command_error("缺少 user_id/agent_id/run_id，无法清空记忆。")
+
+    layer_order = _build_layer_order(scope, layers=layers, preferred=None, session_enabled=plugin_config.SESSION_ISOLATION)
+    if not layer_order:
+        return _format_command_error("未找到可删除的层级。")
+
+    deleted_layers: List[str] = []
+    try:
+        for layer in layer_order:
+            layer_ids = scope.layer_ids(layer)
+            if not layer_ids:
+                continue
+            client.delete_all(
+                user_id=layer_ids["user_id"] if layer_ids["layer"] == "global" else None,
+                agent_id=layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None,
+                run_id=layer_ids["run_id"] if layer_ids["layer"] == "conversation" else None,
+            )
+            deleted_layers.append(layer_ids["layer"])
+    except Exception as exc:  # pragma: no cover
+        logger.error(f"清空记忆失败: {exc}")
+        return _format_command_error(str(exc))
+
+    if not deleted_layers:
+        return _format_command_error("未能匹配任何可删除的层级。")
+    return f"🧹 已删除层级：{', '.join(deleted_layers)}"
+
+
+async def _command_history(memory_id: str) -> str:
+    client = await get_mem0_client()
+    if client is None:
+        return _format_command_error("mem0 client init failed，检查插件配置。")
+    try:
+        results = client.history(memory_id)
+    except Exception as exc:  # pragma: no cover
+        logger.error(f"获取历史失败: {exc}")
+        return _format_command_error(str(exc))
+    history_list = format_history_output(results)
+    text = format_history_text(history_list)
+    return "📜 记忆历史：\n" + text
+
+
+async def _command_search(scope: MemoryScope, query: str, layers: Optional[List[str]], limit: int) -> str:
+    plugin_config = get_memory_config()
+    client = await get_mem0_client()
+    if client is None:
+        return _format_command_error("mem0 client init failed，检查插件配置。")
+    if not scope.has_scope():
+        return _format_command_error("缺少 user_id/agent_id/run_id，无法搜索记忆。")
+    layer_order = _build_layer_order(scope, layers=layers, preferred=None, session_enabled=plugin_config.SESSION_ISOLATION)
+    if not layer_order:
+        return _format_command_error("未找到可搜索的层级。")
+
+    merged_results: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+    for layer in layer_order:
+        layer_ids = scope.layer_ids(layer)
+        if not layer_ids:
+            continue
+        search_run_id = layer_ids["run_id"] if plugin_config.SESSION_ISOLATION or layer_ids["layer"] == "conversation" else None
+        search_agent_id = layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None
+        search_user_id = layer_ids["user_id"] if layer_ids["layer"] == "global" else None
+
+        raw_results = client.search(
+            query,
+            user_id=search_user_id,
+            agent_id=search_agent_id,
+            run_id=search_run_id,
+            limit=limit,
+            threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD,
+        )
+        merged_results.extend(_annotate_results(raw_results, layer_ids["layer"], seen_ids))
+
+    merged_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    merged_results = merged_results[:limit]
+    formatted = format_search_output(merged_results, threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD)
+    return "🔍 搜索结果：\n" + (formatted.get("text") or "(无结果)")
+
+
+async def _command_add(scope: MemoryScope, memory_text: str, preferred_layer: Optional[str], metadata: Dict[str, Any]) -> str:
+    plugin_config = get_memory_config()
+    client = await get_mem0_client()
+    if client is None:
+        return _format_command_error("mem0 client init failed，检查插件配置。")
+    if not scope.has_scope():
+        return _format_command_error("缺少 user_id/agent_id/run_id，无法写入记忆。")
+
+    target_layer = scope.pick_layer(preferred=preferred_layer, enable_session_layer=plugin_config.SESSION_ISOLATION)
+    layer_ids = scope.layer_ids(target_layer or "")
+    if layer_ids is None:
+        return _format_command_error("未能确定可用的记忆层级，请提供 layer 或 user_id/agent_id/run_id。")
+
+    try:
+        result = client.add(
+            memory_text,
+            user_id=layer_ids["user_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "global" else None,
+            agent_id=layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None,
+            run_id=layer_ids["run_id"],
+            metadata=metadata or {},
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.error(f"添加记忆失败: {exc}")
+        return _format_command_error(str(exc))
+
+    formatted = format_add_output(result)
+    layer_label = layer_ids.get("layer") or target_layer or "unknown"
+    return f"✅ 已添加至 {layer_label} 层：{formatted}"
+
+
+@memory_command_entry.handle()
+async def handle_memory_command(matcher: Matcher, event: MessageEvent, args: Message = CommandArg()) -> None:
+    text = args.extract_plain_text().strip()
+    if not text:
+        await finish_with(matcher, MEMORY_HELP_TEXT)
+        return
+
+    tokens = text.split()
+    action = tokens[0].lower()
+    positional, options = _split_tokens(tokens[1:])
+    scope = _build_scope_from_event(event, options)
+
+    if action in {"list", "ls"}:
+        layer_arg = options.get("layer") or (positional[0] if positional else None)
+        tags = _parse_tags(options.get("tags"))
+        message_text = await _command_list_memory(scope, layers=_parse_layers(layer_arg), tags=tags)
+        await finish_with(matcher, message_text)
+        return
+
+    if action in {"delete", "del", "rm"}:
+        if not positional:
+            await finish_with(matcher, _format_command_error("用法: mem delete <memory_id>"))
+            return
+        message_text = await _command_delete_memory(positional[0])
+        await finish_with(matcher, message_text)
+        return
+
+    if action in {"clear", "delete_all", "purge"}:
+        layer_arg = options.get("layer") or (positional[0] if positional else None)
+        message_text = await _command_clear_memory(scope, layers=_parse_layers(layer_arg))
+        await finish_with(matcher, message_text)
+        return
+
+    if action in {"history", "hist"}:
+        if not positional:
+            await finish_with(matcher, _format_command_error("用法: mem history <memory_id>"))
+            return
+        message_text = await _command_history(positional[0])
+        await finish_with(matcher, message_text)
+        return
+
+    if action in {"search", "s"}:
+        if not positional:
+            await finish_with(matcher, _format_command_error("用法: mem search <query> [layer=xxx]"))
+            return
+        query = " ".join(positional)
+        layer_arg = options.get("layer")
+        limit = int(options.get("limit", "5")) if str(options.get("limit", "5")).isdigit() else 5
+        message_text = await _command_search(scope, query=query, layers=_parse_layers(layer_arg), limit=limit)
+        await finish_with(matcher, message_text)
+        return
+
+    if action in {"add", "a"}:
+        if not positional:
+            await finish_with(matcher, _format_command_error("用法: mem add <文本> [layer=xxx] [tag=TYPE]"))
+            return
+        memory_text = " ".join(positional)
+        preferred_layer = options.get("layer") or options.get("scope")
+        metadata = _parse_metadata(options)
+        message_text = await _command_add(scope, memory_text=memory_text, preferred_layer=preferred_layer, metadata=metadata)
+        await finish_with(matcher, message_text)
+        return
+
+    await finish_with(matcher, MEMORY_HELP_TEXT)

@@ -112,6 +112,21 @@ Agent 可以通过以下函数来操作记忆库：
   - **参数**:
     - `user_id`: 关联的用户ID
 
+## 💬 聊天指令（免代码）
+
+在聊天中直接使用 `/mem` 风格的命令来查看、删除或添加记忆（需要插件运行在含命令适配器的环境，例如 OneBot）。
+
+- `mem list [layer=conversation|persona|global] [tags=T1,T2]`：按层级列出记忆（默认会话→人设→全局）。
+- `mem delete <memory_id>`：删除单条记忆。
+- `mem clear [layer=conversation|persona|global]`：按层级清空（不填 layer 按默认顺序）。
+- `mem history <memory_id>`：查看指定记忆的历史版本。
+- `mem search <query> [layer=xxx] [limit=5]`：语义搜索并展示结果。
+- `mem add <文本> [layer=conversation|persona|global] [tag=TYPE] [meta.xxx=val]`：写入记忆，支持标签与自定义元数据。
+
+可选参数：
+`user=xxx agent=xxx run=xxx layer=xxx tag=TYPE meta.xxx=val`
+（不填则自动使用当前会话/用户推断作用域）。
+
 ## 🏷️ 记忆类型标签
 
 插件支持以下记忆类型标签来分类不同类型的记忆：
