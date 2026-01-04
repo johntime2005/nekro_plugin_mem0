@@ -10,8 +10,8 @@ from mem0.configs.base import MemoryConfig
 from mem0.embeddings.configs import EmbedderConfig
 from mem0.llms.configs import LlmConfig
 from mem0.vector_stores.configs import VectorStoreConfig
-from nekro_agent.api.core import get_qdrant_config, logger
-from .plugin import PluginConfig, get_memory_config
+from nekro_agent.api.core import get_qdrant_config, get_qdrant_client, logger
+from .plugin import PluginConfig, get_memory_config, plugin
 from .utils import get_model_group_info
 
 _mem0_instance: Optional[Union[Memory, MemoryClient]] = None
@@ -27,6 +27,14 @@ def _config_incomplete(plugin_config: PluginConfig) -> bool:
         embedding_group = get_model_group_info(plugin_config.TEXT_EMBEDDING_MODEL, expected_type="embedding")
     except ValueError as exc:
         logger.error(str(exc))
+        return True
+
+    # 验证模型组类型是否正确
+    if llm_group.MODEL_TYPE != "chat":
+        logger.error(f"记忆管理模型组 '{plugin_config.MEMORY_MANAGE_MODEL}' 类型为 '{llm_group.MODEL_TYPE}'，必须是 'chat' 类型")
+        return True
+    if embedding_group.MODEL_TYPE != "embedding":
+        logger.error(f"向量嵌入模型组 '{plugin_config.TEXT_EMBEDDING_MODEL}' 类型为 '{embedding_group.MODEL_TYPE}'，必须是 'embedding' 类型")
         return True
 
     def _missing(value: Optional[str]) -> bool:
@@ -48,6 +56,7 @@ def _build_config_hash(
     embedding_group,
     qdrant_config,
 ) -> str:
+    # 集合名称由 plugin.get_vector_collection_name() 生成，不依赖配置
     parts = [
         plugin_config.MEM0_API_KEY or "",
         plugin_config.MEM0_BASE_URL or "",
@@ -58,7 +67,6 @@ def _build_config_hash(
         qdrant_config.api_key or "",
         plugin_config.REDIS_URL,
         plugin_config.CHROMA_PATH,
-        plugin_config.COLLECTION_NAME,
         str(plugin_config.EMBEDDING_DIMS),
         plugin_config.MEMORY_MANAGE_MODEL,
         plugin_config.TEXT_EMBEDDING_MODEL,
@@ -79,17 +87,19 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
     qdrant_config = get_qdrant_config()
 
     if _config_incomplete(plugin_config):
-        logger.warning("记忆模块配置不完整：请在插件配置中补齐 记忆管理模型/向量嵌入模型 对应的模型组。")
+        logger.warning("❌ 记忆模块配置不完整或类型错误：请在插件配置中正确设置 记忆管理模型（chat类型）和 向量嵌入模型（embedding类型）。")
         return None
 
     llm_group = None
     embedding_group = None
     if not plugin_config.MEM0_API_KEY:
         try:
+            logger.debug(f"正在加载模型配置: MEMORY_MANAGE_MODEL={plugin_config.MEMORY_MANAGE_MODEL}, TEXT_EMBEDDING_MODEL={plugin_config.TEXT_EMBEDDING_MODEL}")
             llm_group = get_model_group_info(plugin_config.MEMORY_MANAGE_MODEL, expected_type="chat")
             embedding_group = get_model_group_info(plugin_config.TEXT_EMBEDDING_MODEL, expected_type="embedding")
+            logger.debug(f"✓ 模型配置加载成功")
         except ValueError as exc:
-            logger.error(str(exc))
+            logger.error(f"❌ 模型配置加载失败: {exc}")
             return None
 
     current_config_hash = _build_config_hash(plugin_config, llm_group, embedding_group, qdrant_config)
@@ -106,37 +116,53 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
             else:
                 vector_config: dict = {}
                 if plugin_config.VECTOR_DB == "qdrant":
-                    base_qdrant_url = plugin_config.QDRANT_URL or qdrant_config.url
-                    parsed_url = urlparse(base_qdrant_url) if base_qdrant_url else None
-                    api_key = plugin_config.QDRANT_API_KEY or qdrant_config.api_key
+                    # 使用插件专属的集合名称，确保隔离性
+                    collection_name = plugin.get_vector_collection_name()
                     vector_config = {
-                        "collection_name": plugin_config.COLLECTION_NAME,
+                        "collection_name": collection_name,
                         "embedding_model_dims": plugin_config.EMBEDDING_DIMS,
                     }
-                    if parsed_url and parsed_url.scheme:
-                        vector_config.update({"url": base_qdrant_url})
-                        if api_key:
-                            vector_config.update({"api_key": api_key})
-                    elif base_qdrant_url:
-                        vector_config.update({"path": base_qdrant_url})
-                        if api_key:
-                            vector_config.update({"api_key": api_key})
+
+                    # 如果用户显式配置了 QDRANT_URL，使用用户配置
+                    if plugin_config.QDRANT_URL:
+                        base_qdrant_url = plugin_config.QDRANT_URL
+                        parsed_url = urlparse(base_qdrant_url)
+                        api_key = plugin_config.QDRANT_API_KEY or qdrant_config.api_key
+
+                        if parsed_url.scheme:
+                            # 网络地址模式
+                            vector_config.update({"url": base_qdrant_url})
+                            if api_key:
+                                vector_config.update({"api_key": api_key})
+                        else:
+                            # 本地文件路径模式
+                            vector_config.update({"path": base_qdrant_url})
+                            if api_key:
+                                vector_config.update({"api_key": api_key})
                     else:
-                        vector_config.update(
-                            {
-                                "url": qdrant_config.url,
-                                "api_key": api_key,
-                            }
-                        )
+                        # 未配置 QDRANT_URL：使用内置 Qdrant 的连接信息
+                        # 注意：mem0 不支持 AsyncQdrantClient，需要使用 url/api_key 让 mem0 自己创建同步客户端
+                        logger.info("使用 NekroAgent 内置 Qdrant 配置...")
+                        if not qdrant_config.url:
+                            logger.error("❌ 内置 Qdrant 配置中缺少 URL！")
+                            raise ConnectionError("内置 Qdrant 配置中缺少 URL")
+
+                        logger.info(f"✓ Qdrant URL: {qdrant_config.url}, 集合名称: {collection_name}")
+                        vector_config.update({
+                            "url": qdrant_config.url,
+                            "api_key": qdrant_config.api_key,
+                        })
                 elif plugin_config.VECTOR_DB == "chroma":
+                    collection_name = plugin.get_vector_collection_name()
                     vector_config = {
                         "path": plugin_config.CHROMA_PATH,
-                        "collection_name": plugin_config.COLLECTION_NAME,
+                        "collection_name": collection_name,
                     }
                 elif plugin_config.VECTOR_DB == "redis":
+                    collection_name = plugin.get_vector_collection_name()
                     vector_config = {
                         "redis_url": plugin_config.REDIS_URL,
-                        "collection_name": plugin_config.COLLECTION_NAME,
+                        "collection_name": collection_name,
                         "embedding_model_dims": plugin_config.EMBEDDING_DIMS,
                     }
                 else:
@@ -165,9 +191,12 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
                 _mem0_instance = Memory(config=memory_config)
 
             _last_config_hash = current_config_hash
-            logger.success("mem0客户端实例创建成功")
+            logger.success("✓ mem0客户端实例创建成功")
         except Exception as e:
-            logger.error(f"创建mem0客户端实例失败: {e}")
+            logger.error(f"❌ 创建mem0客户端实例失败: {e}")
+            logger.error(f"错误类型: {type(e).__name__}")
+            import traceback
+            logger.error(f"错误堆栈:\n{traceback.format_exc()}")
             _mem0_instance = None
 
     return _mem0_instance

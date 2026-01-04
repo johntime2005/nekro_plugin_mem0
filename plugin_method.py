@@ -178,10 +178,30 @@ async def add_memory(
     scope_level: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    添加记忆。
+    添加记忆到指定的记忆层级。
+
+    ⚠️ 重要：三层记忆模型的隔离标识符
+    - conversation 层：使用 run_id（会话ID），记忆仅在当前会话内有效
+    - persona 层：使用 agent_id（人设ID），记忆与特定人设绑定，在该人设的所有会话间共享
+    - global 层：使用 user_id（用户ID），记忆跨人设和会话，属于用户本人
+
+    参数说明：
+        memory: 要添加的记忆内容（字符串或字典）
+        user_id: 用户ID（仅在 global 层有效）
+        agent_id: 人设/助理ID（仅在 persona 层有效）
+        run_id: 会话ID（仅在 conversation 层有效）
+        scope_level: 目标层级，可选值：conversation/persona/global
+        metadata: 可选的元数据，如 {"TYPE": "PREFERENCES", "category": "hobby"}
 
     示例：
-        await add_memory(_ctx, "喜欢科幻电影", user_id="user-1", metadata={"TYPE": "PREFERENCES"}, scope_level="persona")
+        # 添加人设级记忆（跨会话共享）
+        await add_memory(_ctx, "喜欢科幻电影", agent_id="persona_001", scope_level="persona")
+
+        # 添加用户级记忆（跨人设共享）
+        await add_memory(_ctx, "用户真实姓名：张三", user_id="user-123", scope_level="global")
+
+        # 添加会话级记忆（仅当前对话）
+        await add_memory(_ctx, "当前讨论主题：量子物理", run_id="chat-456", scope_level="conversation")
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -225,10 +245,32 @@ async def search_memory(
     limit: int = 5,
 ) -> Dict[str, Any]:
     """
-    按层级搜索记忆。
+    按层级搜索记忆，支持多层级聚合搜索。
+
+    ⚠️ 重要：层级搜索的隔离标识符
+    - 搜索 conversation 层：需要提供 run_id（会话ID）
+    - 搜索 persona 层：需要提供 agent_id（人设ID）
+    - 搜索 global 层：需要提供 user_id（用户ID）
+    - 多层搜索：提供对应层级所需的所有标识符，结果会按相关度排序去重
+
+    参数说明：
+        query: 搜索查询文本（支持语义搜索）
+        user_id: 用户ID（用于搜索 global 层）
+        agent_id: 人设ID（用于搜索 persona 层）
+        run_id: 会话ID（用于搜索 conversation 层）
+        scope_level: 单一层级搜索，可选值：conversation/persona/global
+        layers: 多层级搜索列表，如 ["persona", "global"]
+        limit: 返回结果数量上限
 
     示例：
-        await search_memory(_ctx, "喜欢吃什么", user_id="user-1", layers=["conversation", "persona", "global"], limit=8)
+        # 在人设层级搜索（需要 agent_id）
+        await search_memory(_ctx, "喜欢什么", agent_id="persona_001", layers=["persona"])
+
+        # 跨多个层级搜索（需要对应的标识符）
+        await search_memory(_ctx, "偏好", agent_id="persona_001", user_id="user-123", layers=["persona", "global"], limit=8)
+
+        # 单层搜索（自动使用上下文中的标识符）
+        await search_memory(_ctx, "历史记录", scope_level="conversation")
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -285,10 +327,34 @@ async def get_all_memory(
     tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    获取指定层级的全部记忆。
+    获取指定层级的全部记忆，支持标签过滤。
+
+    ⚠️ 重要：层级获取的隔离标识符
+    - 获取 conversation 层：需要提供 run_id（会话ID）
+    - 获取 persona 层：需要提供 agent_id（人设ID）- ⚠️ 常见错误：不要用 user_id！
+    - 获取 global 层：需要提供 user_id（用户ID）
+    - 多层获取：提供对应层级所需的所有标识符
+
+    参数说明：
+        user_id: 用户ID（仅用于获取 global 层记忆）
+        agent_id: 人设ID（仅用于获取 persona 层记忆）
+        run_id: 会话ID（仅用于获取 conversation 层记忆）
+        scope_level: 单一层级，可选值：conversation/persona/global
+        layers: 多层级列表，如 ["persona", "global"]
+        tags: 标签过滤器，如 ["PREFERENCES", "FACTS"]
 
     示例：
-        await get_all_memory(_ctx, user_id="user-1", tags=["PREFERENCES"], layers=["persona", "global"])
+        # ❌ 错误：使用 user_id 获取 persona 层（会返回空）
+        await get_all_memory(_ctx, user_id="user-123", layers=["persona"])
+
+        # ✅ 正确：使用 agent_id 获取 persona 层
+        await get_all_memory(_ctx, agent_id="persona_001", layers=["persona"])
+
+        # ✅ 正确：获取用户的全局记忆
+        await get_all_memory(_ctx, user_id="user-123", layers=["global"])
+
+        # ✅ 正确：跨层级获取（需要对应标识符）
+        await get_all_memory(_ctx, agent_id="persona_001", user_id="user-123", layers=["persona", "global"], tags=["PREFERENCES"])
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -331,7 +397,13 @@ async def update_memory(
     new_memory: str,
 ) -> Dict[str, Any]:
     """
-    更新指定记忆内容。
+    更新指定记忆内容（跨所有层级通用）。
+
+    注意：memory_id 是全局唯一的，更新操作不需要指定层级或标识符。
+
+    参数说明：
+        memory_id: 记忆的唯一ID（可从 search_memory 或 get_all_memory 结果中获取）
+        new_memory: 新的记忆内容
 
     示例：
         await update_memory(_ctx, memory_id="abc123", new_memory="改为喜欢爵士乐")
@@ -358,7 +430,12 @@ async def delete_memory(
     memory_id: str,
 ) -> Dict[str, Any]:
     """
-    删除单条记忆。
+    删除单条记忆（跨所有层级通用）。
+
+    注意：memory_id 是全局唯一的，删除操作不需要指定层级或标识符。
+
+    参数说明：
+        memory_id: 记忆的唯一ID（可从 search_memory 或 get_all_memory 结果中获取）
 
     示例：
         await delete_memory(_ctx, memory_id="abc123")
@@ -389,10 +466,30 @@ async def delete_all_memory(
     layers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    按层级批量删除记忆。
+    按层级批量删除记忆（危险操作，请谨慎使用）。
+
+    ⚠️ 重要：层级删除的隔离标识符
+    - 删除 conversation 层：需要提供 run_id（会话ID）
+    - 删除 persona 层：需要提供 agent_id（人设ID）
+    - 删除 global 层：需要提供 user_id（用户ID）
+    - 多层删除：提供对应层级所需的所有标识符
+
+    参数说明：
+        user_id: 用户ID（用于删除 global 层记忆）
+        agent_id: 人设ID（用于删除 persona 层记忆）
+        run_id: 会话ID（用于删除 conversation 层记忆）
+        scope_level: 单一层级，可选值：conversation/persona/global
+        layers: 多层级列表，如 ["persona", "global"]
 
     示例：
-        await delete_all_memory(_ctx, user_id="user-1", layers=["conversation", "persona"])
+        # 删除特定人设的所有记忆
+        await delete_all_memory(_ctx, agent_id="persona_001", layers=["persona"])
+
+        # 删除用户的全局记忆
+        await delete_all_memory(_ctx, user_id="user-123", layers=["global"])
+
+        # 清空多个层级
+        await delete_all_memory(_ctx, agent_id="persona_001", user_id="user-123", layers=["persona", "global"])
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -438,7 +535,12 @@ async def get_memory_history(
     memory_id: str,
 ) -> Dict[str, Any]:
     """
-    查看记忆历史版本。
+    查看指定记忆的历史版本（跨所有层级通用）。
+
+    注意：memory_id 是全局唯一的，查询历史不需要指定层级或标识符。
+
+    参数说明：
+        memory_id: 记忆的唯一ID（可从 search_memory 或 get_all_memory 结果中获取）
 
     示例：
         await get_memory_history(_ctx, memory_id="abc123")
@@ -543,15 +645,38 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
     scope = resolve_memory_scope(_ctx)
     layer_order = scope.default_layer_order(enable_session_layer=config.SESSION_ISOLATION)
     available_layers = ", ".join(layer_order) if layer_order else "无可用层级"
+
     lines = [
         "你可以使用记忆插件在多个会话间维持用户/Agent的长期记忆。",
-        "写入记忆：调用 add_memory(memory, user_id, agent_id?, run_id?, metadata?, scope_level?)，scope_level 可取 conversation/persona/global。",
-        "检索记忆：调用 search_memory(query, user_id?, agent_id?, run_id?, scope_level?/layers?, limit?)，默认按层级顺序搜索。",
+        "",
+        "⚠️ 重要：三层记忆模型的隔离标识符（请务必理解）：",
+        "  • conversation 层：使用 run_id，记忆仅在当前会话内有效",
+        "  • persona 层：使用 agent_id（人设ID），记忆与特定人设绑定，在该人设的所有会话间共享",
+        "  • global 层：使用 user_id，记忆跨人设和会话，属于用户本人",
+        "",
+        "❌ 常见错误：",
+        "  • 不要用 user_id 操作 persona 层（会失败或返回空）",
+        "  • 不要用 agent_id 操作 global 层（会失败或返回空）",
+        "  • persona 层跨会话共享需要在不同会话中使用相同的 agent_id",
+        "",
+        "写入记忆：调用 add_memory(memory, scope_level, user_id?, agent_id?, run_id?, metadata?)",
+        "  • 写入 persona 层：add_memory(memory, agent_id='xxx', scope_level='persona')",
+        "  • 写入 global 层：add_memory(memory, user_id='xxx', scope_level='global')",
+        "  • 写入 conversation 层：add_memory(memory, run_id='xxx', scope_level='conversation')",
+        "",
+        "检索记忆：调用 search_memory(query, layers?, user_id?, agent_id?, run_id?, limit?)",
+        "  • 搜索 persona 层：search_memory(query, agent_id='xxx', layers=['persona'])",
+        "  • 搜索 global 层：search_memory(query, user_id='xxx', layers=['global'])",
+        "  • 跨层搜索：search_memory(query, agent_id='xxx', user_id='xxx', layers=['persona', 'global'])",
+        "",
+        "获取全部记忆：调用 get_all_memory(layers?, user_id?, agent_id?, run_id?, tags?)",
+        "  • 获取 persona 层：get_all_memory(agent_id='xxx', layers=['persona'])",
+        "  • 获取 global 层：get_all_memory(user_id='xxx', layers=['global'])",
+        "",
         "更新记忆：调用 update_memory(memory_id, new_memory)，用于修订已存知识。",
-        "删除记忆：调用 delete_memory(memory_id) 删除单条，或 delete_all_memory(user_id?, agent_id?, run_id?) 清空作用域。",
+        "删除记忆：调用 delete_memory(memory_id) 删除单条，或 delete_all_memory(layers?, user_id?, agent_id?, run_id?) 清空作用域。",
         f"当前相似度阈值: {config.MEMORY_SEARCH_SCORE_THRESHOLD}。",
         f"可用层级顺序: {available_layers}。",
-        "层级选择建议：对话上下文或短暂状态 -> conversation；与当前人设/角色绑定的习惯与设定 -> persona；与用户身份关联的长期资料 -> global。",
     ]
 
     if config.ENABLE_AGENT_SCOPE:
@@ -571,7 +696,6 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
     if scope.user_id:
         lines.append(f"全局层 user_id: {scope.user_id}")
 
-    lines.append("run_id 会被安全编码存储，可放心跨实例迁移。")
     return "\n".join(lines)
 
 
