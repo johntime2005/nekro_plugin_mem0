@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from nekro_agent.api.schemas import AgentCtx
+from nekro_agent.core import logger
+from nekro_agent.core.config import ModelConfigGroup, config as core_config
 
 
 def get_preset_id(chat_key: Optional[str]) -> str:
@@ -50,3 +52,15 @@ def resolve_memory_scope(
         resolved_run_id = get_preset_id(resolved_run_id)
 
     return MemoryScope(user_id=resolved_user_id, agent_id=resolved_agent_id, run_id=resolved_run_id)
+
+
+def get_model_group_info(model_name: str, expected_type: Optional[str] = None) -> ModelConfigGroup:
+    """根据模型组名称获取配置，必要时校验模型类型。"""
+    try:
+        group = core_config.MODEL_GROUPS[model_name]
+    except KeyError as exc:
+        raise ValueError(f"模型组 '{model_name}' 不存在，请确认配置正确") from exc
+
+    if expected_type and group.MODEL_TYPE != expected_type:
+        logger.warning(f"模型组 '{model_name}' 类型为 '{group.MODEL_TYPE}'，与期望的 '{expected_type}' 不一致")
+    return group
