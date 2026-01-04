@@ -12,6 +12,7 @@ from .mem0_output_formatter import (
     format_history_output,
     format_history_text,
     format_search_output,
+    _format_memory_list,
 )
 from .mem0_utils import get_mem0_client
 from .plugin import get_memory_config, plugin
@@ -221,6 +222,71 @@ async def get_memory_history(
 
     history_list = format_history_output(results)
     return {"ok": True, "results": history_list, "text": format_history_text(history_list)}
+
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.AGENT,
+    name="记忆指令面板",
+    description="提供命令式入口，便于在后台/网页操作：支持 add/search/list/update/delete/delete_all/history",
+)
+async def memory_command(
+    _ctx: AgentCtx,
+    action: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """统一命令入口，便于上层做网页/后台交互调用。"""
+    payload = payload or {}
+    action = (action or "").lower()
+
+    if action == "add":
+        return await add_memory(
+            _ctx,
+            memory=payload.get("memory"),
+            user_id=payload.get("user_id"),
+            metadata=payload.get("metadata"),
+            agent_id=payload.get("agent_id"),
+            run_id=payload.get("run_id"),
+        )
+    if action == "search":
+        resp = await search_memory(
+            _ctx,
+            query=payload.get("query", ""),
+            user_id=payload.get("user_id"),
+            agent_id=payload.get("agent_id"),
+            run_id=payload.get("run_id"),
+            limit=payload.get("limit", 5),
+        )
+        if resp.get("ok"):
+            resp["text"] = resp.get("text") or _format_memory_list(resp.get("results", []))
+        return resp
+    if action == "list":
+        resp = await get_all_memory(
+            _ctx,
+            user_id=payload.get("user_id"),
+            agent_id=payload.get("agent_id"),
+            run_id=payload.get("run_id"),
+            tags=payload.get("tags"),
+        )
+        return resp
+    if action == "update":
+        return await update_memory(
+            _ctx,
+            memory_id=payload.get("memory_id", ""),
+            new_memory=payload.get("new_memory", ""),
+        )
+    if action == "delete":
+        return await delete_memory(_ctx, memory_id=payload.get("memory_id", ""))
+    if action == "delete_all":
+        return await delete_all_memory(
+            _ctx,
+            user_id=payload.get("user_id"),
+            agent_id=payload.get("agent_id"),
+            run_id=payload.get("run_id"),
+        )
+    if action == "history":
+        return await get_memory_history(_ctx, memory_id=payload.get("memory_id", ""))
+
+    return {"ok": False, "error": f"未知操作: {action}"}
 
 
 @plugin.mount_prompt_inject_method(
