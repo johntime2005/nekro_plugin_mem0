@@ -30,8 +30,19 @@ def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
 
 
 def _build_layer_order(scope, layers: Optional[List[str]], preferred: Optional[str], session_enabled: bool) -> List[str]:
+    # 当用户显式提供 layers 时，这里进行标准化与校验，避免后续出现静默跳过的无效层级。
     if layers:
-        return layers
+        normalized_layers: List[str] = []
+        for layer in layers:
+            # 使用 scope.layer_ids 来判断层级是否有效，并获取规范化后的层级名称（如果有）
+            layer_info = scope.layer_ids(layer)
+            if not layer_info:
+                continue
+            canonical_name = layer_info.get("layer", layer)
+            if canonical_name not in normalized_layers:
+                normalized_layers.append(canonical_name)
+        if normalized_layers:
+            return normalized_layers
     if preferred:
         return [preferred]
     return scope.default_layer_order(enable_session_layer=session_enabled)
