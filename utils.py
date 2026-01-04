@@ -105,11 +105,11 @@ def resolve_memory_scope(
     run_id: Optional[str] = None,
     persona_id: Optional[str] = None,
 ) -> MemoryScope:
-    def _safe_getattr(obj, name: str) -> Optional[str]:
+    def _safe_getattr(obj, name: str, default=None) -> Optional[str]:
         try:
-            return getattr(obj, name, None)
+            return getattr(obj, name, default)
         except Exception:
-            return None
+            return default
 
     resolved_user_id = _normalize(user_id)
     if not resolved_user_id:
