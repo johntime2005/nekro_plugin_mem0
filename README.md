@@ -1,4 +1,4 @@
-# Nekro Agent 长期记忆插件 (nekro-plugin-memory)
+# Nekro Agent 长期记忆插件 (nekro-plugin-mem0)
 
 > 一个为 NekroAgent 提供强大长期记忆能力的插件，基于 [mem0](https://github.com/mem0-ai/mem0) 实现。
 
@@ -19,8 +19,8 @@
 ### 1. 克隆本仓库
 
 ```bash
-git clone https://github.com/johntime2005/nekro-plugin-memory.git
-cd nekro-plugin-memory
+git clone https://github.com/johntime2005/nekro-plugin-mem0.git
+cd nekro-plugin-mem0
 ```
 
 ### 2. 安装依赖

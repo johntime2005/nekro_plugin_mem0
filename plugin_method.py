@@ -139,6 +139,12 @@ def _parse_metadata(options: Dict[str, str]) -> Dict[str, Any]:
 
 def _build_scope_from_event(event: MessageEvent, options: Dict[str, str]) -> MemoryScope:
     user_id = _normalize_cli_value(options.get("user") or options.get("u") or getattr(event, "user_id", None))
+
+    # 修复：OneBot v11 的 user_id 需要添加 "private_" 前缀，与 db_user.unique_id 保持一致
+    # 这样才能匹配 Agent 写入时使用的 user_id
+    if user_id and user_id.isdigit():
+        user_id = f"private_{user_id}"
+
     # 如果需要人设/Agent隔离，可以通过 agent=xxx 传入；默认留空，与 sandbox 默认行为一致（优先会话/用户）
     agent_id = _normalize_cli_value(options.get("agent") or options.get("persona") or options.get("preset"))
     run_source = _normalize_cli_value(
@@ -151,6 +157,14 @@ def _build_scope_from_event(event: MessageEvent, options: Dict[str, str]) -> Mem
         or getattr(event, "user_id", None)
     )
     run_id = get_preset_id(run_source) if run_source else None
+
+    # 调试日志：记录作用域构建信息
+    logger.debug(
+        f"[Memory] 构建作用域 - user_id={user_id}, agent_id={agent_id}, run_id={run_id}, "
+        f"run_source={run_source}, event.user_id={getattr(event, 'user_id', None)}, "
+        f"event.group_id={getattr(event, 'group_id', None)}"
+    )
+
     return MemoryScope(user_id=user_id, agent_id=agent_id, run_id=run_id)
 
 
@@ -209,10 +223,23 @@ async def add_memory(
         return {"ok": False, "error": "mem0 client init failed"}
 
     scope = resolve_memory_scope(_ctx, user_id=user_id, agent_id=agent_id, run_id=run_id)
+
+    # 调试日志：记录写入作用域
+    logger.info(
+        f"[Memory] 添加记忆 - scope: user_id={scope.user_id}, agent_id={scope.agent_id}, "
+        f"run_id={scope.run_id}, preset_title={scope.preset_title}, "
+        f"参数: user_id={user_id}, agent_id={agent_id}, run_id={run_id}, scope_level={scope_level}"
+    )
+
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法写入记忆"}
 
     target_layer = scope.pick_layer(preferred=scope_level, enable_session_layer=plugin_config.SESSION_ISOLATION)
+    logger.info(
+        f"[Memory] 选择层级 - target_layer={target_layer}, SESSION_ISOLATION={plugin_config.SESSION_ISOLATION}, "
+        f"ENABLE_AGENT_SCOPE={plugin_config.ENABLE_AGENT_SCOPE}"
+    )
+
     layer_ids = scope.layer_ids(target_layer or "")
     if layer_ids is None:
         return {"ok": False, "error": "未能确定可用的记忆层级，请提供 scope_level 或 user_id/agent_id/run_id"}
@@ -723,10 +750,19 @@ async def _command_list_memory(scope: MemoryScope, layers: Optional[List[str]], 
     client = await get_mem0_client()
     if client is None:
         return _format_command_error("mem0 client init failed，检查插件配置。")
+
+    # 调试日志：记录作用域状态
+    logger.info(
+        f"[Memory] 列出记忆 - user_id={scope.user_id}, agent_id={scope.agent_id}, "
+        f"run_id={scope.run_id}, has_scope={scope.has_scope()}, layers={layers}"
+    )
+
     if not scope.has_scope():
         return _format_command_error("缺少 user_id/agent_id/run_id，无法列出记忆。")
 
     layer_order = _build_layer_order(scope, layers=layers, preferred=None, session_enabled=plugin_config.SESSION_ISOLATION)
+    logger.info(f"[Memory] 层级顺序: {layer_order}, SESSION_ISOLATION={plugin_config.SESSION_ISOLATION}")
+
     if not layer_order:
         return _format_command_error("未找到可获取的层级。")
 
@@ -735,15 +771,30 @@ async def _command_list_memory(scope: MemoryScope, layers: Optional[List[str]], 
     for layer in layer_order:
         layer_ids = scope.layer_ids(layer)
         if not layer_ids:
+            logger.warning(f"[Memory] 跳过层级 {layer}，layer_ids 为空")
             continue
-        raw = client.get_all(
-            user_id=layer_ids["user_id"] if layer_ids["layer"] == "global" else None,
-            agent_id=layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None,
-            run_id=layer_ids["run_id"] if layer_ids["layer"] == "conversation" else None,
+
+        # 调试日志：记录查询参数
+        query_user_id = layer_ids["user_id"] if layer_ids["layer"] == "global" else None
+        query_agent_id = layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None
+        query_run_id = layer_ids["run_id"] if layer_ids["layer"] == "conversation" else None
+
+        logger.info(
+            f"[Memory] 查询层级 {layer} - user_id={query_user_id}, "
+            f"agent_id={query_agent_id}, run_id={query_run_id}, "
+            f"ENABLE_AGENT_SCOPE={plugin_config.ENABLE_AGENT_SCOPE}"
         )
+
+        raw = client.get_all(
+            user_id=query_user_id,
+            agent_id=query_agent_id,
+            run_id=query_run_id,
+        )
+        logger.info(f"[Memory] 层级 {layer} 返回 {len(raw) if raw else 0} 条记忆")
         merged_results.extend(_annotate_results(raw, layer_ids["layer"], seen_ids))
 
     formatted = format_get_all_output(merged_results, tags=tags)
+    logger.info(f"[Memory] 合并后共 {len(merged_results)} 条记忆")
     return "📒 记忆列表：\n" + (formatted.get("text") or "(无结果)")
 
 
@@ -811,9 +862,18 @@ async def _command_search(scope: MemoryScope, query: str, layers: Optional[List[
     client = await get_mem0_client()
     if client is None:
         return _format_command_error("mem0 client init failed，检查插件配置。")
+
+    # 调试日志：记录搜索参数
+    logger.info(
+        f"[Memory] 搜索记忆 - query='{query}', user_id={scope.user_id}, agent_id={scope.agent_id}, "
+        f"run_id={scope.run_id}, has_scope={scope.has_scope()}, layers={layers}, limit={limit}"
+    )
+
     if not scope.has_scope():
         return _format_command_error("缺少 user_id/agent_id/run_id，无法搜索记忆。")
     layer_order = _build_layer_order(scope, layers=layers, preferred=None, session_enabled=plugin_config.SESSION_ISOLATION)
+    logger.info(f"[Memory] 搜索层级顺序: {layer_order}, SESSION_ISOLATION={plugin_config.SESSION_ISOLATION}")
+
     if not layer_order:
         return _format_command_error("未找到可搜索的层级。")
 
@@ -822,10 +882,16 @@ async def _command_search(scope: MemoryScope, query: str, layers: Optional[List[
     for layer in layer_order:
         layer_ids = scope.layer_ids(layer)
         if not layer_ids:
+            logger.warning(f"[Memory] 搜索跳过层级 {layer}，layer_ids 为空")
             continue
         search_run_id = layer_ids["run_id"] if plugin_config.SESSION_ISOLATION or layer_ids["layer"] == "conversation" else None
         search_agent_id = layer_ids["agent_id"] if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona" else None
         search_user_id = layer_ids["user_id"] if layer_ids["layer"] == "global" else None
+
+        logger.info(
+            f"[Memory] 在层级 {layer} 搜索 - user_id={search_user_id}, "
+            f"agent_id={search_agent_id}, run_id={search_run_id}"
+        )
 
         raw_results = client.search(
             query,
@@ -835,10 +901,12 @@ async def _command_search(scope: MemoryScope, query: str, layers: Optional[List[
             limit=limit,
             threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD,
         )
+        logger.info(f"[Memory] 层级 {layer} 搜索返回 {len(raw_results) if raw_results else 0} 条结果")
         merged_results.extend(_annotate_results(raw_results, layer_ids["layer"], seen_ids))
 
     merged_results.sort(key=lambda x: x.get("score", 0), reverse=True)
     merged_results = merged_results[:limit]
+    logger.info(f"[Memory] 搜索合并后共 {len(merged_results)} 条结果")
     formatted = format_search_output(merged_results, threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD)
     return "🔍 搜索结果：\n" + (formatted.get("text") or "(无结果)")
 
@@ -884,6 +952,21 @@ async def handle_memory_command(matcher: Matcher, event: MessageEvent, args: Mes
     action = tokens[0].lower()
     positional, options = _split_tokens(tokens[1:])
     scope = _build_scope_from_event(event, options)
+
+    # 临时调试：显示作用域信息
+    if action == "debug":
+        debug_info = (
+            f"🔍 调试信息：\n"
+            f"event.user_id = {getattr(event, 'user_id', None)}\n"
+            f"event.group_id = {getattr(event, 'group_id', None)}\n"
+            f"scope.user_id = {scope.user_id}\n"
+            f"scope.agent_id = {scope.agent_id}\n"
+            f"scope.run_id = {scope.run_id}\n"
+            f"scope.has_scope() = {scope.has_scope()}\n"
+            f"options = {options}"
+        )
+        await finish_with(matcher, debug_info)
+        return
 
     if action in {"list", "ls"}:
         layer_arg = options.get("layer") or (positional[0] if positional else None)

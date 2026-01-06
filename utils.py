@@ -111,9 +111,23 @@ def resolve_memory_scope(
         except Exception:
             return default
 
+    # 调试日志：记录 AgentCtx 的原始信息
+    db_user = _safe_getattr(ctx, "db_user")
+    db_chat_channel = _safe_getattr(ctx, "db_chat_channel")
+    logger.debug(
+        f"[Memory] resolve_memory_scope - "
+        f"ctx.user_id={_safe_getattr(ctx, 'user_id')}, "
+        f"ctx.agent_id={_safe_getattr(ctx, 'agent_id')}, "
+        f"ctx.bot_id={_safe_getattr(ctx, 'bot_id')}, "
+        f"ctx.chat_key={_safe_getattr(ctx, 'chat_key')}, "
+        f"ctx.session_id={_safe_getattr(ctx, 'session_id')}, "
+        f"db_user.unique_id={_safe_getattr(db_user, 'unique_id') if db_user else None}, "
+        f"db_chat_channel.preset_id={_safe_getattr(db_chat_channel, 'preset_id') if db_chat_channel else None}, "
+        f"db_chat_channel.channel_name={_safe_getattr(db_chat_channel, 'channel_name') if db_chat_channel else None}"
+    )
+
     resolved_user_id = _normalize(user_id)
     if not resolved_user_id:
-        db_user = _safe_getattr(ctx, "db_user")
         user_unique_id = _safe_getattr(db_user, "unique_id") if db_user else None
         resolved_user_id = (
             _normalize(user_unique_id)
@@ -124,7 +138,6 @@ def resolve_memory_scope(
     resolved_agent_id = _normalize(agent_id) or _normalize(persona_id) or _normalize(_safe_getattr(ctx, "agent_id", None) or _safe_getattr(ctx, "bot_id", None))
     preset_title = None
     if not resolved_agent_id:
-        db_chat_channel = _safe_getattr(ctx, "db_chat_channel")
         preset_id = _safe_getattr(db_chat_channel, "preset_id") if db_chat_channel else None
         if preset_id is not None:
             resolved_agent_id = f"preset:{preset_id}"
@@ -134,6 +147,13 @@ def resolve_memory_scope(
 
     resolved_run_source = _normalize(run_id) or _normalize(_safe_getattr(ctx, "chat_key", None) or _safe_getattr(ctx, "session_id", None))
     resolved_run_id = get_preset_id(resolved_run_source) if resolved_run_source else None
+
+    # 调试日志：记录解析结果
+    logger.info(
+        f"[Memory] resolve_memory_scope 结果 - "
+        f"user_id={resolved_user_id}, agent_id={resolved_agent_id}, "
+        f"run_id={resolved_run_id}, preset_title={preset_title}"
+    )
 
     return MemoryScope(user_id=resolved_user_id, agent_id=resolved_agent_id, run_id=resolved_run_id, preset_title=preset_title)
 
