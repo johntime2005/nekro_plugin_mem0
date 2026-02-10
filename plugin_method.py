@@ -275,6 +275,7 @@ async def add_memory(
         else None,
         run_id=layer_ids["run_id"],
         metadata=metadata or {},
+        infer=False,  # 强制关闭推断，确保记忆直接写入（避免因 LLM 配置问题导致写入空结果）
     )
     formatted = format_add_output(result)
     formatted["layer"] = layer_ids["layer"]
@@ -1094,6 +1095,7 @@ async def _command_add(
             else None,
             run_id=layer_ids["run_id"],
             metadata=metadata or {},
+            infer=False,  # 强制关闭推断
         )
     except Exception as exc:  # pragma: no cover
         logger.error(f"添加记忆失败: {exc}")
