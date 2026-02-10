@@ -367,7 +367,7 @@ async def search_memory(
             layer_ids["user_id"] if layer_ids["layer"] == "global" else None
         )
 
-        # mem0 v1.0.0 compatibility: threshold is removed, use filters instead
+        # mem0 v1.0.0 compatibility: threshold is removed, we rely on post-filtering
         search_kwargs = {
             "query": query,
             "user_id": search_user_id,
@@ -376,10 +376,9 @@ async def search_memory(
             "limit": limit,
         }
 
-        if plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD is not None:
-            search_kwargs["filters"] = {
-                "score": {"gte": plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD}
-            }
+        # NOTE: Do NOT use filters for score/threshold for OSS backends (Qdrant/Chroma)
+        # as they don't support dynamic score filtering in the search query.
+        # We handle threshold filtering in format_search_output instead.
 
         raw_results = client.search(**search_kwargs)
         merged_results.extend(
@@ -1032,7 +1031,7 @@ async def _command_search(
             f"agent_id={search_agent_id}, run_id={search_run_id}"
         )
 
-        # mem0 v1.0.0 compatibility: threshold is removed, use filters instead
+        # mem0 v1.0.0 compatibility: threshold is removed, we rely on post-filtering
         search_kwargs = {
             "query": query,
             "user_id": search_user_id,
@@ -1041,10 +1040,9 @@ async def _command_search(
             "limit": limit,
         }
 
-        if plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD is not None:
-            search_kwargs["filters"] = {
-                "score": {"gte": plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD}
-            }
+        # NOTE: Do NOT use filters for score/threshold for OSS backends (Qdrant/Chroma)
+        # as they don't support dynamic score filtering in the search query.
+        # We handle threshold filtering in format_search_output instead.
 
         raw_results = client.search(**search_kwargs)
         logger.info(
