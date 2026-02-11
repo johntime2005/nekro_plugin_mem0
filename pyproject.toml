@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nekro_plugin_mem0"
-version = "1.2.0"
+version = "1.4.0"
 description = "Nekro Agent 长期记忆插件，基于 mem0 实现"
 authors = ["johntime2005 <johntime2005@github.com>"]
 readme = "README.md"
@@ -9,7 +9,7 @@ repository = "https://github.com/johntime2005/nekro-plugin-mem0"
 
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.12"
+python = ">=3.10,<3.13"
 nekro-agent = ">=1.0.0"
 mem0ai = "^1.0.1"
 pydantic-settings = "^2.3.4"

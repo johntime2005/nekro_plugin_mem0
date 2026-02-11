@@ -136,6 +136,11 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
 
     if _last_config_hash != current_config_hash or _mem0_instance is None:
         try:
+            import mem0
+
+            logger.info(
+                f"🚀 [Mem0 Plugin v1.4.0] 初始化中... (mem0ai lib: {getattr(mem0, '__version__', 'unknown')})"
+            )
             logger.info("正在创建新的mem0客户端实例...")
 
             if plugin_config.MEM0_API_KEY:
