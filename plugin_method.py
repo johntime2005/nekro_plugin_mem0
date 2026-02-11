@@ -1032,7 +1032,8 @@ async def _command_search(
             f"agent_id={search_agent_id}, run_id={search_run_id}"
         )
 
-        # mem0 v1.0.0 compatibility: threshold is removed, we rely on post-filtering
+        # mem0 v1.0.0+ compatibility: threshold is removed, we rely on post-filtering
+        # NOTE: user_id/agent_id/run_id are now keyword arguments in v1.0.0+, NOT inside filters
         search_kwargs = {
             "query": query,
             "user_id": search_user_id,
