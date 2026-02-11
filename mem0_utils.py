@@ -23,18 +23,26 @@ def _config_incomplete(plugin_config: PluginConfig) -> bool:
         return False
 
     try:
-        llm_group = get_model_group_info(plugin_config.MEMORY_MANAGE_MODEL, expected_type="chat")
-        embedding_group = get_model_group_info(plugin_config.TEXT_EMBEDDING_MODEL, expected_type="embedding")
+        llm_group = get_model_group_info(
+            plugin_config.MEMORY_MANAGE_MODEL, expected_type="chat"
+        )
+        embedding_group = get_model_group_info(
+            plugin_config.TEXT_EMBEDDING_MODEL, expected_type="embedding"
+        )
     except ValueError as exc:
         logger.error(str(exc))
         return True
 
     # 验证模型组类型是否正确
     if llm_group.MODEL_TYPE != "chat":
-        logger.error(f"记忆管理模型组 '{plugin_config.MEMORY_MANAGE_MODEL}' 类型为 '{llm_group.MODEL_TYPE}'，必须是 'chat' 类型")
+        logger.error(
+            f"记忆管理模型组 '{plugin_config.MEMORY_MANAGE_MODEL}' 类型为 '{llm_group.MODEL_TYPE}'，必须是 'chat' 类型"
+        )
         return True
     if embedding_group.MODEL_TYPE != "embedding":
-        logger.error(f"向量嵌入模型组 '{plugin_config.TEXT_EMBEDDING_MODEL}' 类型为 '{embedding_group.MODEL_TYPE}'，必须是 'embedding' 类型")
+        logger.error(
+            f"向量嵌入模型组 '{plugin_config.TEXT_EMBEDDING_MODEL}' 类型为 '{embedding_group.MODEL_TYPE}'，必须是 'embedding' 类型"
+        )
         return True
 
     def _missing(value: Optional[str]) -> bool:
@@ -73,9 +81,21 @@ def _build_config_hash(
     ]
 
     if llm_group:
-        parts.extend([llm_group.API_KEY or "", llm_group.CHAT_MODEL or "", llm_group.BASE_URL or ""])
+        parts.extend(
+            [
+                llm_group.API_KEY or "",
+                llm_group.CHAT_MODEL or "",
+                llm_group.BASE_URL or "",
+            ]
+        )
     if embedding_group:
-        parts.extend([embedding_group.API_KEY or "", embedding_group.CHAT_MODEL or "", embedding_group.BASE_URL or ""])
+        parts.extend(
+            [
+                embedding_group.API_KEY or "",
+                embedding_group.CHAT_MODEL or "",
+                embedding_group.BASE_URL or "",
+            ]
+        )
 
     return str(hash("|".join(parts)))
 
@@ -87,22 +107,32 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
     qdrant_config = get_qdrant_config()
 
     if _config_incomplete(plugin_config):
-        logger.warning("❌ 记忆模块配置不完整或类型错误：请在插件配置中正确设置 记忆管理模型（chat类型）和 向量嵌入模型（embedding类型）。")
+        logger.warning(
+            "❌ 记忆模块配置不完整或类型错误：请在插件配置中正确设置 记忆管理模型（chat类型）和 向量嵌入模型（embedding类型）。"
+        )
         return None
 
     llm_group = None
     embedding_group = None
     if not plugin_config.MEM0_API_KEY:
         try:
-            logger.debug(f"正在加载模型配置: MEMORY_MANAGE_MODEL={plugin_config.MEMORY_MANAGE_MODEL}, TEXT_EMBEDDING_MODEL={plugin_config.TEXT_EMBEDDING_MODEL}")
-            llm_group = get_model_group_info(plugin_config.MEMORY_MANAGE_MODEL, expected_type="chat")
-            embedding_group = get_model_group_info(plugin_config.TEXT_EMBEDDING_MODEL, expected_type="embedding")
+            logger.debug(
+                f"正在加载模型配置: MEMORY_MANAGE_MODEL={plugin_config.MEMORY_MANAGE_MODEL}, TEXT_EMBEDDING_MODEL={plugin_config.TEXT_EMBEDDING_MODEL}"
+            )
+            llm_group = get_model_group_info(
+                plugin_config.MEMORY_MANAGE_MODEL, expected_type="chat"
+            )
+            embedding_group = get_model_group_info(
+                plugin_config.TEXT_EMBEDDING_MODEL, expected_type="embedding"
+            )
             logger.debug(f"✓ 模型配置加载成功")
         except ValueError as exc:
             logger.error(f"❌ 模型配置加载失败: {exc}")
             return None
 
-    current_config_hash = _build_config_hash(plugin_config, llm_group, embedding_group, qdrant_config)
+    current_config_hash = _build_config_hash(
+        plugin_config, llm_group, embedding_group, qdrant_config
+    )
 
     if _last_config_hash != current_config_hash or _mem0_instance is None:
         try:
@@ -147,11 +177,15 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
                             logger.error("❌ 内置 Qdrant 配置中缺少 URL！")
                             raise ConnectionError("内置 Qdrant 配置中缺少 URL")
 
-                        logger.info(f"✓ Qdrant URL: {qdrant_config.url}, 集合名称: {collection_name}")
-                        vector_config.update({
-                            "url": qdrant_config.url,
-                            "api_key": qdrant_config.api_key,
-                        })
+                        logger.info(
+                            f"✓ Qdrant URL: {qdrant_config.url}, 集合名称: {collection_name}"
+                        )
+                        vector_config.update(
+                            {
+                                "url": qdrant_config.url,
+                                "api_key": qdrant_config.api_key,
+                            }
+                        )
                 elif plugin_config.VECTOR_DB == "chroma":
                     collection_name = plugin.get_vector_collection_name()
                     vector_config = {
@@ -166,7 +200,9 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
                         "embedding_model_dims": plugin_config.EMBEDDING_DIMS,
                     }
                 else:
-                    raise ValueError(f"暂不支持的向量数据库类型: {plugin_config.VECTOR_DB}")
+                    raise ValueError(
+                        f"暂不支持的向量数据库类型: {plugin_config.VECTOR_DB}"
+                    )
 
                 embedder = EmbedderConfig(
                     provider="openai",
@@ -185,9 +221,16 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
                         "openai_base_url": llm_group.BASE_URL or None,
                     },
                 )
-                vector_store = VectorStoreConfig(provider=plugin_config.VECTOR_DB, config=vector_config)
+                vector_store = VectorStoreConfig(
+                    provider=plugin_config.VECTOR_DB, config=vector_config
+                )
 
-                memory_config = MemoryConfig(embedder=embedder, vector_store=vector_store, llm=llm)
+                memory_config = MemoryConfig(
+                    embedder=embedder,
+                    vector_store=vector_store,
+                    llm=llm,
+                    version="v1.1",  # Required for mem0 v1.0.0+
+                )
                 _mem0_instance = Memory(config=memory_config)
 
             _last_config_hash = current_config_hash
@@ -196,6 +239,7 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
             logger.error(f"❌ 创建mem0客户端实例失败: {e}")
             logger.error(f"错误类型: {type(e).__name__}")
             import traceback
+
             logger.error(f"错误堆栈:\n{traceback.format_exc()}")
             _mem0_instance = None
 
