@@ -2,6 +2,7 @@
 mem0 工具
 """
 
+import asyncio
 from typing import Optional, Union
 from urllib.parse import urlparse
 
@@ -144,7 +145,8 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
             logger.info("正在创建新的mem0客户端实例...")
 
             if plugin_config.MEM0_API_KEY:
-                _mem0_instance = MemoryClient(
+                _mem0_instance = await asyncio.to_thread(
+                    MemoryClient,
                     api_key=plugin_config.MEM0_API_KEY,
                     host=plugin_config.MEM0_BASE_URL or None,
                 )
@@ -236,7 +238,7 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
                     llm=llm,
                     version="v1.1",  # Required for mem0 v1.0.0+
                 )
-                _mem0_instance = Memory(config=memory_config)
+                _mem0_instance = await asyncio.to_thread(Memory, config=memory_config)
 
             _last_config_hash = current_config_hash
             logger.success("✓ mem0客户端实例创建成功")

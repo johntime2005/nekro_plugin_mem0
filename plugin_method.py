@@ -2,6 +2,7 @@
 插件方法
 """
 
+import asyncio
 from typing import Any, Dict, List, Optional, Set, Tuple
 from nonebot.adapters.onebot.v11 import Message, MessageEvent
 from nonebot.matcher import Matcher
@@ -31,6 +32,22 @@ def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
         if value:
             return str(value)
     return None
+
+
+def _fire_and_forget(coro) -> None:
+    """将协程提交到后台执行，不阻塞当前调用。错误仅记录日志。"""
+
+    async def _wrapper():
+        try:
+            await coro
+        except Exception as exc:
+            logger.error(f"[Memory] 后台写操作失败: {exc}")
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_wrapper())
+    except RuntimeError:
+        logger.error("[Memory] 无法提交后台任务：没有运行中的事件循环")
 
 
 def _build_layer_order(
@@ -189,12 +206,16 @@ def _format_command_error(message: str) -> str:
 @plugin.mount_init_method()
 async def init_plugin() -> None:
     logger.info("记忆插件初始化中...")
+    await get_mem0_client()
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.AGENT,
+    SandboxMethodType.BEHAVIOR,
     name="添加记忆",
-    description="为用户的个人资料添加一条新记忆，添加的记忆与该用户相关",
+    description=(
+        "为用户的个人资料添加一条新记忆，添加的记忆与该用户相关。"
+        "此操作为非阻塞操作，调用后立即返回，实际写入在后台完成，可以和发送消息写在同一个代码块中。"
+    ),
 )
 async def add_memory(
     _ctx: AgentCtx,
@@ -206,7 +227,10 @@ async def add_memory(
     scope_level: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    添加记忆到指定的记忆层级。
+    添加记忆到指定的记忆层级（非阻塞，立即返回）。
+
+    此函数会立即返回成功状态，实际的向量数据库写入在后台异步完成，不会阻塞后续代码执行。
+    因此可以安全地与 send_text 等消息发送函数写在同一个代码块中。
 
     ⚠️ 重要：三层记忆模型的隔离标识符
     - conversation 层：使用 run_id（会话ID），记忆仅在当前会话内有效
@@ -265,27 +289,33 @@ async def add_memory(
             "error": "未能确定可用的记忆层级，请提供 scope_level 或 user_id/agent_id/run_id",
         }
 
-    result = client.add(
-        memory,
-        user_id=layer_ids["user_id"]
-        if plugin_config.ENABLE_AGENT_SCOPE or target_layer == "global"
-        else None,
-        agent_id=layer_ids["agent_id"]
-        if plugin_config.ENABLE_AGENT_SCOPE or target_layer == "persona"
-        else None,
-        run_id=layer_ids["run_id"],
-        metadata=metadata or {},
-        infer=False,  # 强制关闭推断，确保记忆直接写入（避免因 LLM 配置问题导致写入空结果）
+    # 后台执行实际写入，立即返回不阻塞沙盒
+    _fire_and_forget(
+        asyncio.to_thread(
+            client.add,
+            memory,
+            user_id=layer_ids["user_id"]
+            if plugin_config.ENABLE_AGENT_SCOPE or target_layer == "global"
+            else None,
+            agent_id=layer_ids["agent_id"]
+            if plugin_config.ENABLE_AGENT_SCOPE or target_layer == "persona"
+            else None,
+            run_id=layer_ids["run_id"],
+            metadata=metadata or {},
+            infer=False,
+        )
     )
-    formatted = format_add_output(result)
-    formatted["layer"] = layer_ids["layer"]
-    return formatted
+    return {"ok": True, "layer": layer_ids["layer"], "message": "记忆已提交写入"}
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.AGENT,
+    SandboxMethodType.BEHAVIOR,
     name="搜索记忆",
-    description="根据查询语句搜索用户记忆",
+    description=(
+        "根据查询语句搜索用户记忆。"
+        "此操作需要等待向量数据库返回结果，可能耗时较长。"
+        "建议将搜索操作与发送消息分开到不同代码块中，先搜索获取结果，再在下一个代码块中发送消息。"
+    ),
 )
 async def search_memory(
     _ctx: AgentCtx,
@@ -381,7 +411,7 @@ async def search_memory(
         # as they don't support dynamic score filtering in the search query.
         # We handle threshold filtering in format_search_output instead.
 
-        raw_results = client.search(**search_kwargs)
+        raw_results = await asyncio.to_thread(client.search, **search_kwargs)
         merged_results.extend(
             _annotate_results(raw_results, layer_ids["layer"], seen_ids)
         )
@@ -396,9 +426,13 @@ async def search_memory(
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.AGENT,
+    SandboxMethodType.BEHAVIOR,
     name="获取记忆列表",
-    description="获取指定作用域（user/agent/run）的全部记忆，可按标签过滤",
+    description=(
+        "获取指定作用域（user/agent/run）的全部记忆，可按标签过滤。"
+        "此操作需要等待向量数据库返回结果，可能耗时较长。"
+        "建议将获取操作与发送消息分开到不同代码块中。"
+    ),
 )
 async def get_all_memory(
     _ctx: AgentCtx,
@@ -465,7 +499,8 @@ async def get_all_memory(
         layer_ids = scope.layer_ids(layer)
         if not layer_ids:
             continue
-        raw = client.get_all(
+        raw = await asyncio.to_thread(
+            client.get_all,
             user_id=layer_ids["user_id"] if layer_ids["layer"] == "global" else None,
             agent_id=layer_ids["agent_id"]
             if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona"
@@ -481,9 +516,12 @@ async def get_all_memory(
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.AGENT,
+    SandboxMethodType.BEHAVIOR,
     name="更新记忆",
-    description="根据记忆ID更新记忆内容",
+    description=(
+        "根据记忆ID更新记忆内容。"
+        "此操作为非阻塞操作，调用后立即返回，实际更新在后台完成，可以和发送消息写在同一个代码块中。"
+    ),
 )
 async def update_memory(
     _ctx: AgentCtx,
@@ -491,7 +529,9 @@ async def update_memory(
     new_memory: str,
 ) -> Dict[str, Any]:
     """
-    更新指定记忆内容（跨所有层级通用）。
+    更新指定记忆内容（跨所有层级通用，非阻塞，立即返回）。
+
+    此函数会立即返回成功状态，实际的向量数据库更新在后台异步完成，不会阻塞后续代码执行。
 
     注意：memory_id 是全局唯一的，更新操作不需要指定层级或标识符。
 
@@ -506,25 +546,36 @@ async def update_memory(
     if client is None:
         return {"ok": False, "error": "mem0 client init failed"}
 
-    try:
-        result = client.update(memory_id, new_memory)
-    except Exception as exc:  # pragma: no cover - mem0内部异常透出
-        logger.error(f"更新记忆失败: {exc}")
-        return {"ok": False, "error": str(exc)}
-    return {"ok": True, "result": result}
+    # 后台执行实际更新，立即返回不阻塞沙盒
+    _fire_and_forget(asyncio.to_thread(client.update, memory_id, new_memory))
+    return {"ok": True, "message": "记忆更新已提交"}
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.AGENT,
+    SandboxMethodType.BEHAVIOR,
     name="删除记忆",
-    description="根据记忆ID删除单条记忆",
+    description=(
+        "根据记忆ID删除单条记忆。当发现记忆内容已过时、不准确或与当前事实矛盾时，应主动调用此方法清理。"
+        "例如：用户更正了之前的信息、用户偏好发生变化、记忆内容与新获取的信息冲突等情况。"
+        "此操作为非阻塞操作，调用后立即返回，实际删除在后台完成，可以和发送消息写在同一个代码块中。"
+    ),
 )
 async def delete_memory(
     _ctx: AgentCtx,
     memory_id: str,
 ) -> Dict[str, Any]:
     """
-    删除单条记忆（跨所有层级通用）。
+    删除单条记忆（跨所有层级通用，非阻塞，立即返回）。
+
+    此函数会立即返回成功状态，实际的向量数据库删除在后台异步完成，不会阻塞后续代码执行。
+
+    💡 记忆清理最佳实践：
+    你应该主动清理过时的记忆，以保持记忆库的准确性。以下情况应删除旧记忆：
+    - 用户主动更正了之前的信息（如"我其实不喜欢XX"→删除之前"喜欢XX"的记忆）
+    - 用户偏好/状态发生变化（如换了工作、搬了家→删除旧的工作/地址记忆）
+    - 记忆内容与新信息矛盾（保留最新的，删除过时的）
+    - 临时性信息已过期（如"明天要开会"→会议结束后可清理）
+    建议在添加新记忆前，先搜索是否存在相关的旧记忆，如有矛盾则先删除旧记忆再添加新记忆。
 
     注意：memory_id 是全局唯一的，删除操作不需要指定层级或标识符。
 
@@ -538,18 +589,18 @@ async def delete_memory(
     if client is None:
         return {"ok": False, "error": "mem0 client init failed"}
 
-    try:
-        result = client.delete(memory_id)
-    except Exception as exc:  # pragma: no cover
-        logger.error(f"删除记忆失败: {exc}")
-        return {"ok": False, "error": str(exc)}
-    return {"ok": True, "result": result}
+    # 后台执行实际删除，立即返回不阻塞沙盒
+    _fire_and_forget(asyncio.to_thread(client.delete, memory_id))
+    return {"ok": True, "message": "记忆删除已提交"}
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.AGENT,
+    SandboxMethodType.BEHAVIOR,
     name="删除作用域记忆",
-    description="删除指定 user/agent/run 对应的全部记忆",
+    description=(
+        "删除指定 user/agent/run 对应的全部记忆（危险操作，请谨慎使用）。"
+        "此操作为非阻塞操作，调用后立即返回，实际删除在后台完成，可以和发送消息写在同一个代码块中。"
+    ),
 )
 async def delete_all_memory(
     _ctx: AgentCtx,
@@ -560,7 +611,9 @@ async def delete_all_memory(
     layers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    按层级批量删除记忆（危险操作，请谨慎使用）。
+    按层级批量删除记忆（危险操作，请谨慎使用。非阻塞，立即返回）。
+
+    此函数会立即返回成功状态，实际的向量数据库删除在后台异步完成，不会阻塞后续代码执行。
 
     ⚠️ 重要：层级删除的隔离标识符
     - 删除 conversation 层：需要提供 run_id（会话ID）
@@ -605,37 +658,43 @@ async def delete_all_memory(
     if not layer_order:
         return {"ok": False, "error": "未找到可删除的层级"}
 
-    deleted_layers: List[str] = []
-    try:
-        for layer in layer_order:
-            layer_ids = scope.layer_ids(layer)
-            if not layer_ids:
-                continue
-            client.delete_all(
-                user_id=layer_ids["user_id"]
-                if layer_ids["layer"] == "global"
+    # 收集需要删除的层级信息，提交到后台执行
+    target_layers: List[str] = []
+    for layer in layer_order:
+        layer_ids = scope.layer_ids(layer)
+        if not layer_ids:
+            continue
+        target_layers.append(layer_ids["layer"])
+
+        async def _do_delete_all(_layer_ids=layer_ids):
+            await asyncio.to_thread(
+                client.delete_all,
+                user_id=_layer_ids["user_id"]
+                if _layer_ids["layer"] == "global"
                 else None,
-                agent_id=layer_ids["agent_id"]
-                if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona"
+                agent_id=_layer_ids["agent_id"]
+                if plugin_config.ENABLE_AGENT_SCOPE or _layer_ids["layer"] == "persona"
                 else None,
-                run_id=layer_ids["run_id"]
-                if layer_ids["layer"] == "conversation"
+                run_id=_layer_ids["run_id"]
+                if _layer_ids["layer"] == "conversation"
                 else None,
             )
-            deleted_layers.append(layer_ids["layer"])
-    except Exception as exc:  # pragma: no cover
-        logger.error(f"删除全部记忆失败: {exc}")
-        return {"ok": False, "error": str(exc)}
 
-    if not deleted_layers:
+        _fire_and_forget(_do_delete_all())
+
+    if not target_layers:
         return {"ok": False, "error": "未能匹配任何可删除的层级"}
-    return {"ok": True, "message": f"已删除指定作用域记忆：{', '.join(deleted_layers)}"}
+    return {"ok": True, "message": f"已提交删除作用域记忆：{', '.join(target_layers)}"}
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.AGENT,
+    SandboxMethodType.BEHAVIOR,
     name="获取记忆历史",
-    description="查看指定记忆的历史版本",
+    description=(
+        "查看指定记忆的历史版本。"
+        "此操作需要等待向量数据库返回结果，可能耗时较长。"
+        "建议将获取操作与发送消息分开到不同代码块中。"
+    ),
 )
 async def get_memory_history(
     _ctx: AgentCtx,
@@ -657,7 +716,7 @@ async def get_memory_history(
         return {"ok": False, "error": "mem0 client init failed"}
 
     try:
-        results = client.history(memory_id)
+        results = await asyncio.to_thread(client.history, memory_id)
     except Exception as exc:  # pragma: no cover
         logger.error(f"获取记忆历史失败: {exc}")
         return {"ok": False, "error": str(exc)}
@@ -671,9 +730,9 @@ async def get_memory_history(
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.AGENT,
+    SandboxMethodType.BEHAVIOR,
     name="记忆指令面板",
-    description="提供命令式入口，便于在后台/网页操作：支持 add/search/list/update/delete/delete_all/history",
+    description="提供命令式入口，便于在后台/网页操作：支持 add/search/list/update/delete/delete_all/history。",
 )
 async def memory_command(
     _ctx: AgentCtx,
@@ -764,6 +823,41 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
     lines = [
         "你可以使用记忆插件在多个会话间维持用户/Agent的长期记忆。",
         "",
+        "📌 【操作类型与调用规范】：",
+        "记忆操作分为两类，请区分对待：",
+        "",
+        "  🟢 写操作（非阻塞，立即返回）：add_memory / update_memory / delete_memory / delete_all_memory",
+        "     这些操作会立即返回，实际写入在后台完成。可以和 send_text 等消息发送写在同一个代码块中。",
+        "",
+        "  🟡 读操作（需要等待结果）：search_memory / get_all_memory / get_memory_history",
+        "     这些操作需要等待向量数据库返回结果，可能耗时较长。",
+        "     建议将读操作与发送消息分开到不同代码块中，避免因耗时过长导致执行超时。",
+        "     正确做法：代码块1执行搜索 → 代码块2根据结果发送消息。",
+        "",
+        "✅ 可以这样写（写操作 + 发消息在一起）：",
+        "  ```",
+        "  await add_memory(_ctx, '用户喜欢猫')",
+        "  await send_text(_ctx, '好的，我记住了！')",
+        "  ```",
+        "",
+        "✅ 读操作建议分开代码块：",
+        "  ```",
+        "  # 代码块1：搜索记忆",
+        "  result = await search_memory(_ctx, '用户的爱好')",
+        "  ```",
+        "  ```",
+        "  # 代码块2：根据结果回复",
+        "  await send_text(_ctx, f'根据我的记忆，你的爱好是...')",
+        "  ```",
+        "",
+        "🧹 【记忆清理最佳实践】：",
+        "你应该主动维护记忆库的准确性，及时清理过时或矛盾的记忆：",
+        "  • 当用户更正信息时（如'我其实不喜欢XX'），先搜索并删除旧的错误记忆，再添加正确的",
+        "  • 当用户状态变化时（如换工作、搬家），删除旧状态记忆，添加新状态",
+        "  • 当发现记忆之间存在矛盾时，保留最新的，删除过时的",
+        "  • 临时性信息过期后应清理（如已结束的事件、已完成的计划）",
+        "  • 建议流程：搜索相关旧记忆 → 删除过时的 → 添加新记忆",
+        "",
         "⚠️ 重要：三层记忆模型的隔离标识符（请务必理解）：",
         "  • conversation 层：使用 run_id，记忆仅在当前会话内有效",
         "  • persona 层：使用 agent_id（人设ID），记忆与特定人设绑定，在该人设的所有会话间共享",
@@ -789,7 +883,8 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "  • 获取 global 层：get_all_memory(user_id='xxx', layers=['global'])",
         "",
         "更新记忆：调用 update_memory(memory_id, new_memory)，用于修订已存知识。",
-        "删除记忆：调用 delete_memory(memory_id) 删除单条，或 delete_all_memory(layers?, user_id?, agent_id?, run_id?) 清空作用域。",
+        "删除记忆：调用 delete_memory(memory_id) 删除单条过时/错误记忆。",
+        "批量删除：调用 delete_all_memory(layers?, user_id?, agent_id?, run_id?) 清空作用域。",
         f"当前相似度阈值: {config.MEMORY_SEARCH_SCORE_THRESHOLD}。",
         f"可用层级顺序: {available_layers}。",
     ]
@@ -894,7 +989,8 @@ async def _command_list_memory(
             f"ENABLE_AGENT_SCOPE={plugin_config.ENABLE_AGENT_SCOPE}"
         )
 
-        raw = client.get_all(
+        raw = await asyncio.to_thread(
+            client.get_all,
             user_id=query_user_id,
             agent_id=query_agent_id,
             run_id=query_run_id,
@@ -912,7 +1008,7 @@ async def _command_delete_memory(memory_id: str) -> str:
     if client is None:
         return _format_command_error("mem0 client init failed，检查插件配置。")
     try:
-        client.delete(memory_id)
+        await asyncio.to_thread(client.delete, memory_id)
     except Exception as exc:  # pragma: no cover
         logger.error(f"删除记忆失败: {exc}")
         return _format_command_error(str(exc))
@@ -942,7 +1038,8 @@ async def _command_clear_memory(scope: MemoryScope, layers: Optional[List[str]])
             layer_ids = scope.layer_ids(layer)
             if not layer_ids:
                 continue
-            client.delete_all(
+            await asyncio.to_thread(
+                client.delete_all,
                 user_id=layer_ids["user_id"]
                 if layer_ids["layer"] == "global"
                 else None,
@@ -968,7 +1065,7 @@ async def _command_history(memory_id: str) -> str:
     if client is None:
         return _format_command_error("mem0 client init failed，检查插件配置。")
     try:
-        results = client.history(memory_id)
+        results = await asyncio.to_thread(client.history, memory_id)
     except Exception as exc:  # pragma: no cover
         logger.error(f"获取历史失败: {exc}")
         return _format_command_error(str(exc))
@@ -1046,7 +1143,7 @@ async def _command_search(
         # as they don't support dynamic score filtering in the search query.
         # We handle threshold filtering in format_search_output instead.
 
-        raw_results = client.search(**search_kwargs)
+        raw_results = await asyncio.to_thread(client.search, **search_kwargs)
         logger.info(
             f"[Memory] 层级 {layer} 搜索返回 {len(raw_results) if raw_results else 0} 条结果"
         )
@@ -1086,7 +1183,8 @@ async def _command_add(
         )
 
     try:
-        result = client.add(
+        result = await asyncio.to_thread(
+            client.add,
             memory_text,
             user_id=layer_ids["user_id"]
             if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "global"
