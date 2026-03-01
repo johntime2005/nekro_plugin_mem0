@@ -12,9 +12,9 @@ plugin = NekroPlugin(
     name="记忆插件",
     module_name="nekro_plugin_mem0",
     description="为Nekro Agent提供基于 mem0 v1.0 的长期记忆能力",
-    version="1.3.0",
+    version="1.4.0",
     author="johntime2005",
-    url="https://github.com/johntime2005/nekro-plugin-mem0",
+    url="https://github.com/johntime2005/nekro_plugin_mem0",
 )
 
 
