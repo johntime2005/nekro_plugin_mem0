@@ -315,6 +315,7 @@ async def add_memory(
         "根据查询语句搜索用户记忆。"
         "此操作需要等待向量数据库返回结果，可能耗时较长。"
         "建议将搜索操作与发送消息分开到不同代码块中，先搜索获取结果，再在下一个代码块中发送消息。"
+        "【注意】如果返回内容过长导致截断（如遇到 view_str_content 截断提示），请缩小 limit 行范围或自行提取概要内容避免全文打印。"
     ),
 )
 async def search_memory(
@@ -335,6 +336,8 @@ async def search_memory(
     - 搜索 persona 层：需要提供 agent_id（人设ID）
     - 搜索 global 层：需要提供 user_id（用户ID）
     - 多层搜索：提供对应层级所需的所有标识符，结果会按相关度排序去重
+
+    💡 截断处理提示：若是使用时遇到 view_str_content 返回内容被截断（提示缩减 max_len），请减少 limit 参数，或者不要直接打印完整结果字典，而是提取并打印必要的精简字段。
 
     参数说明：
         query: 搜索查询文本（支持语义搜索）
@@ -432,6 +435,7 @@ async def search_memory(
         "获取指定作用域（user/agent/run）的全部记忆，可按标签过滤。"
         "此操作需要等待向量数据库返回结果，可能耗时较长。"
         "建议将获取操作与发送消息分开到不同代码块中。"
+        "【注意】当记忆条目过多时可能被截断（如遇到 view_str_content 截断提示），建议按 tags 过滤，或自行提取概要字段避免直接全量打印字典。"
     ),
 )
 async def get_all_memory(
@@ -451,6 +455,8 @@ async def get_all_memory(
     - 获取 persona 层：需要提供 agent_id（人设ID）- ⚠️ 常见错误：不要用 user_id！
     - 获取 global 层：需要提供 user_id（用户ID）
     - 多层获取：提供对应层级所需的所有标识符
+
+    💡 截断处理提示：若是遇到 view_str_content 返回内容被截断（提示缩减 max_len），建议根据 tags 过滤缩小范围，或者在代码中循环获取概要字段，不要直接打印完整结果。
 
     参数说明：
         user_id: 用户ID（仅用于获取 global 层记忆）
@@ -694,6 +700,7 @@ async def delete_all_memory(
         "查看指定记忆的历史版本。"
         "此操作需要等待向量数据库返回结果，可能耗时较长。"
         "建议将获取操作与发送消息分开到不同代码块中。"
+        "【注意】如果历史内容过长导致截断（如遇到 view_str_content 截断提示），请自行提取结果概要避免全文打印字典。"
     ),
 )
 async def get_memory_history(
@@ -702,6 +709,8 @@ async def get_memory_history(
 ) -> Dict[str, Any]:
     """
     查看指定记忆的历史版本（跨所有层级通用）。
+
+    💡 截断处理提示：若是遇到 view_str_content 返回内容被截断（提示缩减 max_len），请勿直接打印完整结果字典，而是提取必要的精简字段。
 
     注意：memory_id 是全局唯一的，查询历史不需要指定层级或标识符。
 
