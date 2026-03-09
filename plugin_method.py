@@ -309,12 +309,11 @@ async def add_memory(
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.BEHAVIOR,
+    SandboxMethodType.AGENT,
     name="搜索记忆",
     description=(
         "根据查询语句搜索用户记忆。"
-        "此操作需要等待向量数据库返回结果，可能耗时较长。"
-        "建议将搜索操作与发送消息分开到不同代码块中，先搜索获取结果，再在下一个代码块中发送消息。"
+        "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
         "【注意】如果返回内容过长导致截断（如遇到 view_str_content 截断提示），请缩小 limit 行范围或自行提取概要内容避免全文打印。"
     ),
 )
@@ -429,12 +428,11 @@ async def search_memory(
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.BEHAVIOR,
+    SandboxMethodType.AGENT,
     name="获取记忆列表",
     description=(
         "获取指定作用域（user/agent/run）的全部记忆，可按标签过滤。"
-        "此操作需要等待向量数据库返回结果，可能耗时较长。"
-        "建议将获取操作与发送消息分开到不同代码块中。"
+        "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
         "【注意】当记忆条目过多时可能被截断（如遇到 view_str_content 截断提示），建议按 tags 过滤，或自行提取概要字段避免直接全量打印字典。"
     ),
 )
@@ -694,12 +692,11 @@ async def delete_all_memory(
 
 
 @plugin.mount_sandbox_method(
-    SandboxMethodType.BEHAVIOR,
+    SandboxMethodType.AGENT,
     name="获取记忆历史",
     description=(
         "查看指定记忆的历史版本。"
-        "此操作需要等待向量数据库返回结果，可能耗时较长。"
-        "建议将获取操作与发送消息分开到不同代码块中。"
+        "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
         "【注意】如果历史内容过长导致截断（如遇到 view_str_content 截断提示），请自行提取结果概要避免全文打印字典。"
     ),
 )
