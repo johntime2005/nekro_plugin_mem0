@@ -3,14 +3,13 @@
 """
 
 import asyncio
-from typing import Any, Dict, List, Optional, Set, Tuple
-from nonebot.adapters.onebot.v11 import Message, MessageEvent
-from nonebot.matcher import Matcher
-from nonebot.params import CommandArg
+from typing import Annotated, Any, Dict, List, Optional, Set, Tuple
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core import logger
-from nekro_agent.adapters.onebot_v11.matchers.command import finish_with, on_command
 from nekro_agent.services.plugin.base import SandboxMethodType
+from nekro_agent.services.command.base import CommandPermission
+from nekro_agent.services.command.ctl import CmdCtl
+from nekro_agent.services.command.schemas import Arg, CommandExecutionContext, CommandResponse
 from .mem0_output_formatter import (
     format_add_output,
     format_get_all_output,
@@ -162,19 +161,17 @@ def _parse_metadata(options: Dict[str, str]) -> Dict[str, Any]:
     return metadata
 
 
-def _build_scope_from_event(
-    event: MessageEvent, options: Dict[str, str]
+def _build_scope_from_context(
+    context: CommandExecutionContext, options: Dict[str, str]
 ) -> MemoryScope:
     user_id = _normalize_cli_value(
-        options.get("user") or options.get("u") or getattr(event, "user_id", None)
+        options.get("user") or options.get("u") or context.user_id
     )
 
-    # 修复：OneBot v11 的 user_id 需要添加 "private_" 前缀，与 db_user.unique_id 保持一致
-    # 这样才能匹配 Agent 写入时使用的 user_id
+    # 如果 user_id 是纯数字（旧 OneBot 格式），添加 "private_" 前缀以匹配 db_user.unique_id
     if user_id and user_id.isdigit():
         user_id = f"private_{user_id}"
 
-    # 如果需要人设/Agent隔离，可以通过 agent=xxx 传入；默认留空，与 sandbox 默认行为一致（优先会话/用户）
     agent_id = _normalize_cli_value(
         options.get("agent") or options.get("persona") or options.get("preset")
     )
@@ -182,18 +179,14 @@ def _build_scope_from_event(
         options.get("run")
         or options.get("session")
         or options.get("chat")
-        or getattr(event, "group_id", None)
-        or getattr(event, "channel_id", None)
-        or getattr(event, "guild_id", None)
-        or getattr(event, "user_id", None)
+        or context.chat_key
     )
     run_id = get_preset_id(run_source) if run_source else None
 
-    # 调试日志：记录作用域构建信息
     logger.debug(
         f"[Memory] 构建作用域 - user_id={user_id}, agent_id={agent_id}, run_id={run_id}, "
-        f"run_source={run_source}, event.user_id={getattr(event, 'user_id', None)}, "
-        f"event.group_id={getattr(event, 'group_id', None)}"
+        f"run_source={run_source}, context.user_id={context.user_id}, "
+        f"context.chat_key={context.chat_key}"
     )
 
     return MemoryScope(user_id=user_id, agent_id=agent_id, run_id=run_id)
@@ -921,24 +914,6 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
 
 # ============ 聊天指令：/mem ===============
 
-MEMORY_HELP_TEXT = """🧠 记忆指令帮助
-用法示例：
-- mem list                     # 列出当前会话/用户的记忆
-- mem list layer=global        # 仅查看全局层
-- mem delete <memory_id>       # 删除单条
-- mem clear                    # 按默认层级依次清空
-- mem clear layer=conversation # 只清空会话层
-- mem history <memory_id>      # 查看历史
-- mem search <query>           # 语义搜索（默认按层级顺序）
-- mem add <文本> tag=TYPE      # 添加记忆，可选 layer=conversation/persona/global
-可选参数：user=xxx agent=xxx run=xxx layer=xxx tag=TYPE meta.xxx=val
-"""
-
-
-memory_command_entry = on_command(
-    "mem", aliases={"memory", "记忆"}, priority=5, block=True
-)
-
 
 async def _command_list_memory(
     scope: MemoryScope, layers: Optional[List[str]], tags: Optional[List[str]]
@@ -948,7 +923,6 @@ async def _command_list_memory(
     if client is None:
         return _format_command_error("mem0 client init failed，检查插件配置。")
 
-    # 调试日志：记录作用域状态
     logger.info(
         f"[Memory] 列出记忆 - user_id={scope.user_id}, agent_id={scope.agent_id}, "
         f"run_id={scope.run_id}, has_scope={scope.has_scope()}, layers={layers}"
@@ -978,7 +952,6 @@ async def _command_list_memory(
             logger.warning(f"[Memory] 跳过层级 {layer}，layer_ids 为空")
             continue
 
-        # 调试日志：记录查询参数
         query_user_id = layer_ids["user_id"] if layer_ids["layer"] == "global" else None
         query_agent_id = (
             layer_ids["agent_id"]
@@ -1088,7 +1061,6 @@ async def _command_search(
     if client is None:
         return _format_command_error("mem0 client init failed，检查插件配置。")
 
-    # 调试日志：记录搜索参数
     logger.info(
         f"[Memory] 搜索记忆 - query='{query}', user_id={scope.user_id}, agent_id={scope.agent_id}, "
         f"run_id={scope.run_id}, has_scope={scope.has_scope()}, layers={layers}, limit={limit}"
@@ -1135,8 +1107,6 @@ async def _command_search(
             f"agent_id={search_agent_id}, run_id={search_run_id}"
         )
 
-        # mem0 v1.0.0+ compatibility: threshold is removed, we rely on post-filtering
-        # NOTE: user_id/agent_id/run_id are now keyword arguments in v1.0.0+, NOT inside filters
         search_kwargs = {
             "query": query,
             "user_id": search_user_id,
@@ -1144,10 +1114,6 @@ async def _command_search(
             "run_id": search_run_id,
             "limit": limit,
         }
-
-        # NOTE: Do NOT use filters for score/threshold for OSS backends (Qdrant/Chroma)
-        # as they don't support dynamic score filtering in the search query.
-        # We handle threshold filtering in format_search_output instead.
 
         raw_results = await asyncio.to_thread(client.search, **search_kwargs)
         logger.info(
@@ -1200,7 +1166,7 @@ async def _command_add(
             else None,
             run_id=layer_ids["run_id"],
             metadata=metadata or {},
-            infer=False,  # 强制关闭推断
+            infer=False,
         )
     except Exception as exc:  # pragma: no cover
         logger.error(f"添加记忆失败: {exc}")
@@ -1211,108 +1177,151 @@ async def _command_add(
     return f"✅ 已添加至 {layer_label} 层：{formatted}"
 
 
-@memory_command_entry.handle()
-async def handle_memory_command(
-    matcher: Matcher, event: MessageEvent, args: Message = CommandArg()
-) -> None:
-    text = args.extract_plain_text().strip()
+# ============ 命令组注册 ===============
+
+mem_group = plugin.mount_command_group(
+    name="mem",
+    description="记忆管理指令组",
+    permission=CommandPermission.PUBLIC,
+    category="记忆",
+)
+
+
+@mem_group.command(
+    name="list",
+    description="列出当前作用域的记忆",
+    aliases=["ls"],
+    usage="mem.list [layer=global|persona|conversation] [tags=TAG1,TAG2]",
+)
+async def mem_list_cmd(
+    context: CommandExecutionContext,
+    layer: Annotated[str, Arg("层级过滤", positional=True)] = "",
+    tags: Annotated[str, Arg("标签过滤（逗号分隔）")] = "",
+) -> CommandResponse:
+    options: Dict[str, str] = {}
+    if layer:
+        options["layer"] = layer
+    scope = _build_scope_from_context(context, options)
+    parsed_layers = _parse_layers(layer) if layer else None
+    parsed_tags = _parse_tags(tags) if tags else None
+    message_text = await _command_list_memory(scope, layers=parsed_layers, tags=parsed_tags)
+    return CmdCtl.success(message_text)
+
+
+@mem_group.command(
+    name="search",
+    description="语义搜索记忆",
+    aliases=["s"],
+    usage="mem.search <query> [layer=xxx] [limit=5]",
+)
+async def mem_search_cmd(
+    context: CommandExecutionContext,
+    query: Annotated[str, Arg("搜索关键词", positional=True, greedy=True)] = "",
+    layer: Annotated[str, Arg("层级过滤")] = "",
+    limit: Annotated[int, Arg("返回数量上限", range=(1, 50))] = 5,
+) -> CommandResponse:
+    if not query:
+        return CmdCtl.failed("用法: mem.search <query> [layer=xxx] [limit=5]")
+    options: Dict[str, str] = {}
+    scope = _build_scope_from_context(context, options)
+    parsed_layers = _parse_layers(layer) if layer else None
+    message_text = await _command_search(scope, query=query, layers=parsed_layers, limit=limit)
+    return CmdCtl.success(message_text)
+
+
+@mem_group.command(
+    name="add",
+    description="添加一条记忆",
+    aliases=["a"],
+    usage="mem.add <文本> [layer=xxx] [tag=TYPE]",
+)
+async def mem_add_cmd(
+    context: CommandExecutionContext,
+    text: Annotated[str, Arg("记忆内容", positional=True, greedy=True)] = "",
+    layer: Annotated[str, Arg("目标层级")] = "",
+    tag: Annotated[str, Arg("记忆标签")] = "",
+) -> CommandResponse:
     if not text:
-        await finish_with(matcher, MEMORY_HELP_TEXT)
-        return
+        return CmdCtl.failed("用法: mem.add <文本> [layer=xxx] [tag=TYPE]")
+    options: Dict[str, str] = {}
+    if tag:
+        options["tag"] = tag
+    scope = _build_scope_from_context(context, options)
+    metadata = _parse_metadata(options)
+    preferred_layer = layer if layer else None
+    message_text = await _command_add(scope, memory_text=text, preferred_layer=preferred_layer, metadata=metadata)
+    return CmdCtl.success(message_text)
 
-    tokens = text.split()
-    action = tokens[0].lower()
-    positional, options = _split_tokens(tokens[1:])
-    scope = _build_scope_from_event(event, options)
 
-    # 临时调试：显示作用域信息
-    if action == "debug":
-        debug_info = (
-            f"🔍 调试信息：\n"
-            f"event.user_id = {getattr(event, 'user_id', None)}\n"
-            f"event.group_id = {getattr(event, 'group_id', None)}\n"
-            f"scope.user_id = {scope.user_id}\n"
-            f"scope.agent_id = {scope.agent_id}\n"
-            f"scope.run_id = {scope.run_id}\n"
-            f"scope.has_scope() = {scope.has_scope()}\n"
-            f"options = {options}"
-        )
-        await finish_with(matcher, debug_info)
-        return
+@mem_group.command(
+    name="delete",
+    description="删除单条记忆",
+    aliases=["del", "rm"],
+    usage="mem.delete <memory_id>",
+)
+async def mem_delete_cmd(
+    context: CommandExecutionContext,
+    memory_id: Annotated[str, Arg("记忆ID", positional=True)] = "",
+) -> CommandResponse:
+    if not memory_id:
+        return CmdCtl.failed("用法: mem.delete <memory_id>")
+    message_text = await _command_delete_memory(memory_id)
+    return CmdCtl.success(message_text)
 
-    if action in {"list", "ls"}:
-        layer_arg = options.get("layer") or (positional[0] if positional else None)
-        tags = _parse_tags(options.get("tags"))
-        message_text = await _command_list_memory(
-            scope, layers=_parse_layers(layer_arg), tags=tags
-        )
-        await finish_with(matcher, message_text)
-        return
 
-    if action in {"delete", "del", "rm"}:
-        if not positional:
-            await finish_with(
-                matcher, _format_command_error("用法: mem delete <memory_id>")
-            )
-            return
-        message_text = await _command_delete_memory(positional[0])
-        await finish_with(matcher, message_text)
-        return
+@mem_group.command(
+    name="clear",
+    description="清空指定层级的全部记忆（危险操作）",
+    aliases=["purge"],
+    usage="mem.clear [layer=conversation|persona|global]",
+    permission=CommandPermission.ADVANCED,
+)
+async def mem_clear_cmd(
+    context: CommandExecutionContext,
+    layer: Annotated[str, Arg("目标层级", positional=True)] = "",
+) -> CommandResponse:
+    options: Dict[str, str] = {}
+    scope = _build_scope_from_context(context, options)
+    parsed_layers = _parse_layers(layer) if layer else None
+    message_text = await _command_clear_memory(scope, layers=parsed_layers)
+    return CmdCtl.success(message_text)
 
-    if action in {"clear", "delete_all", "purge"}:
-        layer_arg = options.get("layer") or (positional[0] if positional else None)
-        message_text = await _command_clear_memory(
-            scope, layers=_parse_layers(layer_arg)
-        )
-        await finish_with(matcher, message_text)
-        return
 
-    if action in {"history", "hist"}:
-        if not positional:
-            await finish_with(
-                matcher, _format_command_error("用法: mem history <memory_id>")
-            )
-            return
-        message_text = await _command_history(positional[0])
-        await finish_with(matcher, message_text)
-        return
+@mem_group.command(
+    name="history",
+    description="查看单条记忆的历史版本",
+    aliases=["hist"],
+    usage="mem.history <memory_id>",
+)
+async def mem_history_cmd(
+    context: CommandExecutionContext,
+    memory_id: Annotated[str, Arg("记忆ID", positional=True)] = "",
+) -> CommandResponse:
+    if not memory_id:
+        return CmdCtl.failed("用法: mem.history <memory_id>")
+    message_text = await _command_history(memory_id)
+    return CmdCtl.success(message_text)
 
-    if action in {"search", "s"}:
-        if not positional:
-            await finish_with(
-                matcher, _format_command_error("用法: mem search <query> [layer=xxx]")
-            )
-            return
-        query = " ".join(positional)
-        layer_arg = options.get("layer")
-        limit = (
-            int(options.get("limit", "5"))
-            if str(options.get("limit", "5")).isdigit()
-            else 5
-        )
-        message_text = await _command_search(
-            scope, query=query, layers=_parse_layers(layer_arg), limit=limit
-        )
-        await finish_with(matcher, message_text)
-        return
 
-    if action in {"add", "a"}:
-        if not positional:
-            await finish_with(
-                matcher,
-                _format_command_error("用法: mem add <文本> [layer=xxx] [tag=TYPE]"),
-            )
-            return
-        memory_text = " ".join(positional)
-        preferred_layer = options.get("layer") or options.get("scope")
-        metadata = _parse_metadata(options)
-        message_text = await _command_add(
-            scope,
-            memory_text=memory_text,
-            preferred_layer=preferred_layer,
-            metadata=metadata,
-        )
-        await finish_with(matcher, message_text)
-        return
-
-    await finish_with(matcher, MEMORY_HELP_TEXT)
+@mem_group.command(
+    name="debug",
+    description="显示当前作用域调试信息",
+    permission=CommandPermission.SUPER_USER,
+    internal=True,
+)
+async def mem_debug_cmd(
+    context: CommandExecutionContext,
+) -> CommandResponse:
+    options: Dict[str, str] = {}
+    scope = _build_scope_from_context(context, options)
+    debug_info = (
+        f"🔍 调试信息：\n"
+        f"context.user_id = {context.user_id}\n"
+        f"context.chat_key = {context.chat_key}\n"
+        f"context.adapter_key = {context.adapter_key}\n"
+        f"scope.user_id = {scope.user_id}\n"
+        f"scope.agent_id = {scope.agent_id}\n"
+        f"scope.run_id = {scope.run_id}\n"
+        f"scope.has_scope() = {scope.has_scope()}"
+    )
+    return CmdCtl.success(debug_info)
