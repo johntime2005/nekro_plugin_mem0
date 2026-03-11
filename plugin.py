@@ -68,7 +68,36 @@ class PluginConfig(ConfigBase):
         description="为同一 Agent 跨会话复用记忆（同时仍按需要写入用户/会话维度）",
     )
     PRE_SEARCH_ENABLED: bool = Field(default=True, title="预搜索启用", description="是否启用预搜索功能")
-    PRE_SEARCH_MESSAGE_COUNT: int = Field(default=50, title="预搜索消息数量", description="预搜索时获取的历史消息数量")
+    PRE_SEARCH_DB_MESSAGE_COUNT: int = Field(
+        default=50,
+        title="预搜索数据库消息数",
+        description="从数据库拉取的历史消息数量（用于生成查询）"
+    )
+    PRE_SEARCH_QUERY_MESSAGE_COUNT: int = Field(
+        default=10,
+        title="预搜索查询消息数",
+        description="用于生成查询的用户消息数量（从拉取的消息中筛选）"
+    )
+    PRE_SEARCH_SKIP_CONVERSATION: bool = Field(
+        default=True,
+        title="预搜索跳过会话层",
+        description="跳过 conversation 层搜索（当前对话内容 LLM 已知，跳过可提升性能）"
+    )
+    PRE_SEARCH_RESULT_LIMIT: int = Field(
+        default=5,
+        title="预搜索结果限制",
+        description="每个层级最多返回的记忆数"
+    )
+    PRE_SEARCH_QUERY_MAX_LENGTH: int = Field(
+        default=500,
+        title="预搜索查询最大长度",
+        description="生成的查询字符串最大字符数（避免过长查询影响性能）"
+    )
+    PRE_SEARCH_TIMEOUT: float = Field(
+        default=0.25,
+        title="预搜索超时（秒）",
+        description="预搜索操作的最大等待时间，超时则降级到基础提示"
+    )
 
 
 _memory_config: Optional[PluginConfig] = None
