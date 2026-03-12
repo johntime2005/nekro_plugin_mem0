@@ -154,7 +154,7 @@ class MemoryScope:
 
 
 def resolve_memory_scope(
-    ctx: AgentCtx,
+    ctx: Optional[AgentCtx],
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,

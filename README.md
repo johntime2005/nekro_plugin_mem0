@@ -88,34 +88,36 @@ class MemoryConfig(ConfigBase):
 
 ## 🛠️ 可用函数 (Agent 可调用)
 
-> ⚠️ **重要：上下文参数 `_ctx` 必须作为第一个参数。**
+> ⚠️ **重要：同一组函数有两种调用形态（请按运行环境选择）。**
 >
-> - 在 Nekro Agent 沙盒代码里：`_ctx` 由运行时自动提供，你只需要在调用时原样传入。
-> - 在沙盒外独立脚本调试里：若没有可用的 `AgentCtx`，请传 `None`，并显式提供 `user_id/agent_id/run_id` 中至少一个作用域标识。
+> - **沙盒内（Nekro Agent 运行时）**：第一个参数传 `_ctx`（由运行时注入）。
+> - **沙盒外（独立 Python 脚本）**：第一个参数传 `None`，并显式提供 `user_id/agent_id/run_id` 中至少一个作用域标识。
+>
+> 常见报错根因：在独立脚本里直接照抄 `search_memory(_ctx, ...)`，会触发 `NameError: name '_ctx' is not defined`。
 
 Agent 可以通过以下函数来操作记忆库：
 
-- `add_memory(_ctx, memory, user_id=None, metadata=None, agent_id=None, run_id=None, scope_level=None)`
+- `add_memory(ctx_or_none, memory, user_id=None, metadata=None, agent_id=None, run_id=None, scope_level=None)`
   - **描述**: 添加一条记忆（非阻塞，立即返回；后台异步写入）。
 
-- `search_memory(_ctx, query, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, limit=5)`
+- `search_memory(ctx_or_none, query, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, limit=5)`
   - **描述**: 通过语义检索搜索记忆（阻塞直到返回结果）。
   - **边界**: 仅用于“具体语义查询”（如“我喜欢什么”“之前说过XX吗”）。
   - **不要用于**: “列出所有记忆/全部记忆”这类全量枚举诉求（应使用 `get_all_memory`）。
 
-- `get_all_memory(_ctx, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, tags=None)`
+- `get_all_memory(ctx_or_none, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, tags=None)`
   - **描述**: 获取指定层级的全部记忆，可按标签过滤。
 
-- `update_memory(_ctx, memory_id, new_memory)`
+- `update_memory(ctx_or_none, memory_id, new_memory)`
   - **描述**: 更新指定记忆内容（非阻塞，后台异步更新）。
 
-- `delete_memory(_ctx, memory_id)`
+- `delete_memory(ctx_or_none, memory_id)`
   - **描述**: 删除单条记忆（非阻塞，后台异步删除）。
 
-- `delete_all_memory(_ctx, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None)`
+- `delete_all_memory(ctx_or_none, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None)`
   - **描述**: 删除指定作用域的全部记忆（危险操作）。
 
-- `get_memory_history(_ctx, memory_id)`
+- `get_memory_history(ctx_or_none, memory_id)`
   - **描述**: 查看指定记忆的历史版本。
 
 ### 调用示例
@@ -123,6 +125,11 @@ Agent 可以通过以下函数来操作记忆库：
 ```python
 # 沙盒内（推荐）：_ctx 由运行时注入
 result = await search_memory(_ctx, "和主人的记忆", agent_id="xinger", user_id="private_6502612088", layers=["persona", "global"], limit=20)
+```
+
+```python
+# ❌ 错误：独立脚本里 _ctx 未定义，会直接 NameError
+result = await search_memory(_ctx, "和主人的记忆", agent_id="xinger", user_id="private_6502612088")
 ```
 
 ```python

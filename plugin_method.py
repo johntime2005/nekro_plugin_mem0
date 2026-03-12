@@ -534,10 +534,11 @@ async def init_plugin() -> None:
     description=(
         "为用户的个人资料添加一条新记忆，添加的记忆与该用户相关。"
         "此操作为非阻塞操作，调用后立即返回，实际写入在后台完成，可以和发送消息写在同一个代码块中。"
+        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None 并显式提供 user_id/agent_id/run_id（否则直接写 _ctx 会 NameError）。"
     ),
 )
 async def add_memory(
-    _ctx: AgentCtx,
+    _ctx: Optional[AgentCtx],
     memory: Any,
     user_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
@@ -636,11 +637,12 @@ async def add_memory(
     description=(
         "根据查询语句搜索用户记忆。"
         "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
+        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（不要写 search_memory(_ctx, ...) 以免 NameError）。"
         "【注意】如果返回内容过长导致截断（如遇到 view_str_content 截断提示），请缩小 limit 行范围或自行提取概要内容避免全文打印。"
     ),
 )
 async def search_memory(
-    _ctx: AgentCtx,
+    _ctx: Optional[AgentCtx],
     query: str,
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
@@ -751,11 +753,12 @@ async def search_memory(
     description=(
         "获取指定作用域（user/agent/run）的全部记忆，可按标签过滤。"
         "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
+        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None 并显式提供 user_id/agent_id/run_id（否则直接写 _ctx 会 NameError）。"
         "【注意】当记忆条目过多时可能被截断（如遇到 view_str_content 截断提示），建议按 tags 过滤，或自行提取概要字段避免直接全量打印字典。"
     ),
 )
 async def get_all_memory(
-    _ctx: AgentCtx,
+    _ctx: Optional[AgentCtx],
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
@@ -847,15 +850,20 @@ async def get_all_memory(
     description=(
         "根据记忆ID更新记忆内容。"
         "此操作为非阻塞操作，调用后立即返回，实际更新在后台完成，可以和发送消息写在同一个代码块中。"
+        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（否则直接写 _ctx 会 NameError）。"
     ),
 )
 async def update_memory(
-    _ctx: AgentCtx,
+    _ctx: Optional[AgentCtx],
     memory_id: str,
     new_memory: str,
 ) -> Dict[str, Any]:
     """
     更新指定记忆内容（跨所有层级通用，非阻塞，立即返回）。
+
+    调用约定：
+    - 沙盒内：首参传运行时注入的 _ctx。
+    - 沙盒外独立脚本：首参传 None（避免直接写 _ctx 导致 NameError）。
 
     此函数会立即返回成功状态，实际的向量数据库更新在后台异步完成，不会阻塞后续代码执行。
 
@@ -867,6 +875,7 @@ async def update_memory(
 
     示例：
         await update_memory(_ctx, memory_id="abc123", new_memory="改为喜欢爵士乐")
+        await update_memory(None, memory_id="abc123", new_memory="改为喜欢爵士乐")
     """
     client = await get_mem0_client()
     if client is None:
@@ -884,14 +893,19 @@ async def update_memory(
         "根据记忆ID删除单条记忆。当发现记忆内容已过时、不准确或与当前事实矛盾时，应主动调用此方法清理。"
         "例如：用户更正了之前的信息、用户偏好发生变化、记忆内容与新获取的信息冲突等情况。"
         "此操作为非阻塞操作，调用后立即返回，实际删除在后台完成，可以和发送消息写在同一个代码块中。"
+        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（否则直接写 _ctx 会 NameError）。"
     ),
 )
 async def delete_memory(
-    _ctx: AgentCtx,
+    _ctx: Optional[AgentCtx],
     memory_id: str,
 ) -> Dict[str, Any]:
     """
     删除单条记忆（跨所有层级通用，非阻塞，立即返回）。
+
+    调用约定：
+    - 沙盒内：首参传运行时注入的 _ctx。
+    - 沙盒外独立脚本：首参传 None（避免直接写 _ctx 导致 NameError）。
 
     此函数会立即返回成功状态，实际的向量数据库删除在后台异步完成，不会阻塞后续代码执行。
 
@@ -910,6 +924,7 @@ async def delete_memory(
 
     示例：
         await delete_memory(_ctx, memory_id="abc123")
+        await delete_memory(None, memory_id="abc123")
     """
     client = await get_mem0_client()
     if client is None:
@@ -926,10 +941,11 @@ async def delete_memory(
     description=(
         "删除指定 user/agent/run 对应的全部记忆（危险操作，请谨慎使用）。"
         "此操作为非阻塞操作，调用后立即返回，实际删除在后台完成，可以和发送消息写在同一个代码块中。"
+        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None 并显式提供 user_id/agent_id/run_id（否则直接写 _ctx 会 NameError）。"
     ),
 )
 async def delete_all_memory(
-    _ctx: AgentCtx,
+    _ctx: Optional[AgentCtx],
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
@@ -1019,15 +1035,20 @@ async def delete_all_memory(
     description=(
         "查看指定记忆的历史版本。"
         "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
+        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（否则直接写 _ctx 会 NameError）。"
         "【注意】如果历史内容过长导致截断（如遇到 view_str_content 截断提示），请自行提取结果概要避免全文打印字典。"
     ),
 )
 async def get_memory_history(
-    _ctx: AgentCtx,
+    _ctx: Optional[AgentCtx],
     memory_id: str,
 ) -> Dict[str, Any]:
     """
     查看指定记忆的历史版本（跨所有层级通用）。
+
+    调用约定：
+    - 沙盒内：首参传运行时注入的 _ctx。
+    - 沙盒外独立脚本：首参传 None（避免直接写 _ctx 导致 NameError）。
 
     💡 截断处理提示：若是遇到 view_str_content 返回内容被截断（提示缩减 max_len），请勿直接打印完整结果字典，而是提取必要的精简字段。
 
@@ -1060,15 +1081,22 @@ async def get_memory_history(
 @plugin.mount_sandbox_method(
     SandboxMethodType.BEHAVIOR,
     name="记忆指令面板",
-    description="提供命令式入口，便于在后台/网页操作：支持 add/search/list/update/delete/delete_all/history。",
+    description=(
+        "提供命令式入口，便于在后台/网页操作：支持 add/search/list/update/delete/delete_all/history。"
+        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（否则直接写 _ctx 会 NameError）。"
+    ),
 )
 async def memory_command(
-    _ctx: AgentCtx,
+    _ctx: Optional[AgentCtx],
     action: str,
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     统一命令入口，便于上层做网页/后台交互调用。
+
+    调用约定：
+    - 沙盒内：首参传运行时注入的 _ctx。
+    - 沙盒外独立脚本：首参传 None；并在 payload 中显式给出 user_id/agent_id/run_id 以确保作用域可解析。
 
     示例：
         await memory_command(_ctx, "search", {"query": "最喜欢的颜色", "user_id": "user-1"})
@@ -1461,21 +1489,23 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "  • persona 层跨会话共享需要在不同会话中使用相同的 agent_id",
         "",
         "🔧 调用上下文约定（必须遵守）：",
-        "  • 在 Nekro Agent 沙盒代码中，_ctx 由运行时自动注入，所有记忆方法都必须把 _ctx 作为第一个参数传入。",
-        "  • 在沙盒外独立脚本调试时，如果没有可用 AgentCtx，请显式传入 None，并同时显式提供 user_id/agent_id/run_id。",
+        "  • 这些方法有两种调用形态：沙盒内传 _ctx；沙盒外独立脚本传 None。",
+        "  • 沙盒内（Nekro Agent 运行时）：_ctx 由运行时自动注入，所有记忆方法都把 _ctx 作为第一个参数。",
+        "  • 沙盒外独立脚本：不要写 search_memory(_ctx, ...)，应写 search_memory(None, ...)，并显式提供 user_id/agent_id/run_id。",
         "",
-        "写入记忆：调用 add_memory(_ctx, memory, scope_level?, user_id?, agent_id?, run_id?, metadata?)",
+        "写入记忆：调用 add_memory(ctx_or_none, memory, scope_level?, user_id?, agent_id?, run_id?, metadata?)",
         "  • 写入 persona 层：add_memory(_ctx, memory, agent_id='xxx', scope_level='persona')",
         "  • 写入 global 层：add_memory(_ctx, memory, user_id='xxx', scope_level='global')",
         "  • 写入 conversation 层：add_memory(_ctx, memory, run_id='xxx', scope_level='conversation')",
         "",
-        "检索记忆：调用 search_memory(_ctx, query, layers?, user_id?, agent_id?, run_id?, limit?)",
+        "检索记忆：调用 search_memory(ctx_or_none, query, layers?, user_id?, agent_id?, run_id?, limit?)",
         "  • 搜索 persona 层：search_memory(_ctx, query, agent_id='xxx', layers=['persona'])",
         "  • 搜索 global 层：search_memory(_ctx, query, user_id='xxx', layers=['global'])",
         "  • 跨层搜索：search_memory(_ctx, query, agent_id='xxx', user_id='xxx', layers=['persona', 'global'])",
+        "  • 常见错误（独立脚本）：search_memory(_ctx, query, ...) -> NameError: _ctx is not defined",
         "  • 沙盒外调试示例：search_memory(None, query, agent_id='xxx', user_id='xxx', layers=['persona', 'global'])",
         "",
-        "获取全部记忆：调用 get_all_memory(_ctx, layers?, user_id?, agent_id?, run_id?, tags?)",
+        "获取全部记忆：调用 get_all_memory(ctx_or_none, layers?, user_id?, agent_id?, run_id?, tags?)",
         "  • 获取 persona 层：get_all_memory(_ctx, agent_id='xxx', layers=['persona'])",
         "  • 获取 global 层：get_all_memory(_ctx, user_id='xxx', layers=['global'])",
         "  • 列出 persona+global 全量：get_all_memory(_ctx, agent_id='xxx', user_id='xxx', layers=['persona', 'global'])",
