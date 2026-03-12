@@ -652,6 +652,11 @@ async def search_memory(
     """
     按层级搜索记忆，支持多层级聚合搜索。
 
+    语义边界（非常重要）：
+    - search_memory 是“语义检索”，适合“我喜欢什么/之前提过XX吗”这类具体查询。
+    - 若目的是“列出全部记忆/所有记忆”，请使用 get_all_memory，而不是 search_memory。
+      使用“所有记忆/全部记忆”等泛化 query 进行语义检索，可能因相似度机制返回空结果。
+
     调用约定：
     - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
     - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
@@ -682,6 +687,9 @@ async def search_memory(
 
         # 单层搜索（自动使用上下文中的标识符）
         await search_memory(_ctx, "历史记录", scope_level="conversation")
+
+        # 列出全部记忆（请改用 get_all_memory）
+        await get_all_memory(_ctx, agent_id="persona_001", user_id="user-123", layers=["persona", "global"])
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -1429,6 +1437,11 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "  await send_text(_ctx, f'根据我的记忆，你的爱好是...')",
         "  ```",
         "",
+        "🔎 【search_memory 与 get_all_memory 的边界】（必须遵守）：",
+        "  • search_memory：语义检索（需要具体查询意图），例如‘我喜欢什么’、‘之前提过旅行吗’。",
+        "  • get_all_memory：列举记忆（获取全量/清单），例如‘列出所有记忆/全部记忆’。",
+        "  • 不要用 search_memory(query='所有记忆') 来做全量列举；这会因语义相似度机制出现空结果。",
+        "",
         "🧹 【记忆清理最佳实践】：",
         "你应该主动维护记忆库的准确性，及时清理过时或矛盾的记忆：",
         "  • 当用户更正信息时（如'我其实不喜欢XX'），先搜索并删除旧的错误记忆，再添加正确的",
@@ -1465,6 +1478,7 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "获取全部记忆：调用 get_all_memory(_ctx, layers?, user_id?, agent_id?, run_id?, tags?)",
         "  • 获取 persona 层：get_all_memory(_ctx, agent_id='xxx', layers=['persona'])",
         "  • 获取 global 层：get_all_memory(_ctx, user_id='xxx', layers=['global'])",
+        "  • 列出 persona+global 全量：get_all_memory(_ctx, agent_id='xxx', user_id='xxx', layers=['persona', 'global'])",
         "",
         "更新记忆：调用 update_memory(_ctx, memory_id, new_memory)，用于修订已存知识。",
         "删除记忆：调用 delete_memory(_ctx, memory_id) 删除单条过时/错误记忆。",

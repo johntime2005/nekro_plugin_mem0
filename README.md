@@ -100,6 +100,8 @@ Agent 可以通过以下函数来操作记忆库：
 
 - `search_memory(_ctx, query, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, limit=5)`
   - **描述**: 通过语义检索搜索记忆（阻塞直到返回结果）。
+  - **边界**: 仅用于“具体语义查询”（如“我喜欢什么”“之前说过XX吗”）。
+  - **不要用于**: “列出所有记忆/全部记忆”这类全量枚举诉求（应使用 `get_all_memory`）。
 
 - `get_all_memory(_ctx, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, tags=None)`
   - **描述**: 获取指定层级的全部记忆，可按标签过滤。
@@ -121,6 +123,11 @@ Agent 可以通过以下函数来操作记忆库：
 ```python
 # 沙盒内（推荐）：_ctx 由运行时注入
 result = await search_memory(_ctx, "和主人的记忆", agent_id="xinger", user_id="private_6502612088", layers=["persona", "global"], limit=20)
+```
+
+```python
+# 列出全量记忆：请使用 get_all_memory（不要用 search_memory("所有记忆")）
+result = await get_all_memory(_ctx, agent_id="xinger", user_id="private_6502612088", layers=["persona", "global"])
 ```
 
 ```python
