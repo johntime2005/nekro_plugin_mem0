@@ -85,32 +85,45 @@ class MemoryConfig(ConfigBase):
 
 ## 🛠️ 可用函数 (Agent 可调用)
 
+> ⚠️ **重要：上下文参数 `_ctx` 必须作为第一个参数。**
+>
+> - 在 Nekro Agent 沙盒代码里：`_ctx` 由运行时自动提供，你只需要在调用时原样传入。
+> - 在沙盒外独立脚本调试里：若没有可用的 `AgentCtx`，请传 `None`，并显式提供 `user_id/agent_id/run_id` 中至少一个作用域标识。
+
 Agent 可以通过以下函数来操作记忆库：
 
-- `add_memory(memory: str, user_id: str, metadata: dict)`
-  - **描述**: 为用户的个人资料添加一条新记忆，添加的记忆与该用户相关。
-  - **参数**:
-    - `memory`: 要添加的记忆文本内容
-    - `user_id`: 关联的用户ID
-    - `metadata`: 元数据标签，支持 TYPE 标签分类记忆
+- `add_memory(_ctx, memory, user_id=None, metadata=None, agent_id=None, run_id=None, scope_level=None)`
+  - **描述**: 添加一条记忆（非阻塞，立即返回；后台异步写入）。
 
-- `search_memory(query: str, user_id: str, tags: list = None)`
-  - **描述**: 通过自然语言问句检索指定用户的相关记忆。
-  - **参数**:
-    - `query`: 查询语句，自然语言问题或关键词
-    - `user_id`: 关联的用户ID
-    - `tags`: 可选的记忆类型标签过滤列表
+- `search_memory(_ctx, query, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, limit=5)`
+  - **描述**: 通过语义检索搜索记忆（阻塞直到返回结果）。
 
-- `get_all_memory(user_id: str, tags: list = None)`
-  - **描述**: 获取指定用户的所有记忆，支持按标签过滤。
-  - **参数**:
-    - `user_id`: 关联的用户ID
-    - `tags`: 可选的记忆类型标签过滤列表
+- `get_all_memory(_ctx, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, tags=None)`
+  - **描述**: 获取指定层级的全部记忆，可按标签过滤。
 
-- `delete_all_memory(user_id: str)`
-  - **描述**: 删除指定用户的所有记忆。
-  - **参数**:
-    - `user_id`: 关联的用户ID
+- `update_memory(_ctx, memory_id, new_memory)`
+  - **描述**: 更新指定记忆内容（非阻塞，后台异步更新）。
+
+- `delete_memory(_ctx, memory_id)`
+  - **描述**: 删除单条记忆（非阻塞，后台异步删除）。
+
+- `delete_all_memory(_ctx, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None)`
+  - **描述**: 删除指定作用域的全部记忆（危险操作）。
+
+- `get_memory_history(_ctx, memory_id)`
+  - **描述**: 查看指定记忆的历史版本。
+
+### 调用示例
+
+```python
+# 沙盒内（推荐）：_ctx 由运行时注入
+result = await search_memory(_ctx, "和主人的记忆", agent_id="xinger", user_id="private_6502612088", layers=["persona", "global"], limit=20)
+```
+
+```python
+# 沙盒外独立脚本调试：没有 AgentCtx 时传 None，并显式给出作用域标识
+result = await search_memory(None, "和主人的记忆", agent_id="xinger", user_id="private_6502612088", layers=["persona", "global"], limit=20)
+```
 
 ## 💬 聊天指令（免代码）
 
