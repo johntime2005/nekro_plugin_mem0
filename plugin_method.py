@@ -9,7 +9,11 @@ from nekro_agent.core import logger
 from nekro_agent.services.plugin.base import SandboxMethodType
 from nekro_agent.services.command.base import CommandPermission
 from nekro_agent.services.command.ctl import CmdCtl
-from nekro_agent.services.command.schemas import Arg, CommandExecutionContext, CommandResponse
+from nekro_agent.services.command.schemas import (
+    Arg,
+    CommandExecutionContext,
+    CommandResponse,
+)
 from .mem0_output_formatter import (
     format_add_output,
     format_get_all_output,
@@ -23,10 +27,7 @@ from .mem0_utils import get_mem0_client
 from .plugin import get_memory_config, plugin
 from .utils import MemoryScope, get_preset_id, resolve_memory_scope
 from nekro_agent.models.db_chat_message import DBChatMessage
-from .pre_search_utils import (
-    build_pre_search_query,
-    convert_db_messages_to_dict
-)
+from .pre_search_utils import build_pre_search_query, convert_db_messages_to_dict
 
 
 def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
@@ -227,6 +228,10 @@ async def add_memory(
     """
     添加记忆到指定的记忆层级（非阻塞，立即返回）。
 
+    调用约定：
+    - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
+    - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
+
     此函数会立即返回成功状态，实际的向量数据库写入在后台异步完成，不会阻塞后续代码执行。
     因此可以安全地与 send_text 等消息发送函数写在同一个代码块中。
 
@@ -327,6 +332,10 @@ async def search_memory(
 ) -> Dict[str, Any]:
     """
     按层级搜索记忆，支持多层级聚合搜索。
+
+    调用约定：
+    - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
+    - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
 
     ⚠️ 重要：层级搜索的隔离标识符
     - 搜索 conversation 层：需要提供 run_id（会话ID）
@@ -445,6 +454,10 @@ async def get_all_memory(
 ) -> Dict[str, Any]:
     """
     获取指定层级的全部记忆，支持标签过滤。
+
+    调用约定：
+    - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
+    - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
 
     ⚠️ 重要：层级获取的隔离标识符
     - 获取 conversation 层：需要提供 run_id（会话ID）
@@ -614,6 +627,10 @@ async def delete_all_memory(
 ) -> Dict[str, Any]:
     """
     按层级批量删除记忆（危险操作，请谨慎使用。非阻塞，立即返回）。
+
+    调用约定：
+    - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
+    - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
 
     此函数会立即返回成功状态，实际的向量数据库删除在后台异步完成，不会阻塞后续代码执行。
 
@@ -813,233 +830,253 @@ async def memory_command(
 
 
 async def _search_single_layer(
-    client: Any,
-    query: str,
-    layer_ids: Dict[str, Any],
-    limit: int,
-    config: Any
+    client: Any, query: str, layer_ids: Dict[str, Any], limit: int, config: Any
 ) -> Tuple[str, Any]:
     """
     搜索单个记忆层级。
-    
+
     Args:
         client: mem0 客户端
         query: 搜索查询
         layer_ids: 层级标识符（包含 layer, user_id, agent_id, run_id）
         limit: 结果数量限制
         config: 插件配置
-    
+
     Returns:
         (layer_name, search_results) 元组
     """
-    layer = layer_ids['layer']
-    
+    layer = layer_ids["layer"]
+
     # 构建搜索参数
     search_kwargs = {
-        'query': query,
-        'limit': limit,
+        "query": query,
+        "limit": limit,
     }
-    
+
     # 根据层级设置标识符
-    if layer == 'global':
-        search_kwargs['user_id'] = layer_ids['user_id']
-    elif layer == 'persona':
-        search_kwargs['agent_id'] = layer_ids['agent_id']
+    if layer == "global":
+        search_kwargs["user_id"] = layer_ids["user_id"]
+    elif layer == "persona":
+        search_kwargs["agent_id"] = layer_ids["agent_id"]
         if config.ENABLE_AGENT_SCOPE:
-            search_kwargs['user_id'] = None
-    elif layer == 'conversation':
-        search_kwargs['run_id'] = layer_ids['run_id']
+            search_kwargs["user_id"] = None
+    elif layer == "conversation":
+        search_kwargs["run_id"] = layer_ids["run_id"]
         if config.SESSION_ISOLATION:
-            search_kwargs['user_id'] = None
-            search_kwargs['agent_id'] = None
-    
+            search_kwargs["user_id"] = None
+            search_kwargs["agent_id"] = None
+
     # 执行搜索（包装同步调用为异步）
     try:
         results = await asyncio.to_thread(client.search, **search_kwargs)
         return (layer, results)
     except Exception as exc:
-        logger.warning(f'[Memory] 层级 {layer} 搜索失败: {exc}')
+        logger.warning(f"[Memory] 层级 {layer} 搜索失败: {exc}")
         return (layer, None)
 
 
 async def _fetch_recent_messages(
-    _ctx: AgentCtx,
-    message_count: int
+    _ctx: AgentCtx, message_count: int
 ) -> List[Dict[str, Any]]:
     """
     从数据库获取最近的历史消息。
-    
+
     Args:
         _ctx: Agent 上下文
         message_count: 要获取的消息数量
-    
+
     Returns:
         消息列表，格式 [{'role': 'user', 'content': '...'}]
     """
     try:
-        chat_key = getattr(_ctx, 'chat_key', None)
+        chat_key = getattr(_ctx, "chat_key", None)
         if not chat_key:
-            logger.debug('[PreSearch] 无 chat_key，跳过消息获取')
+            logger.debug("[PreSearch] 无 chat_key，跳过消息获取")
             return []
-        
+
         # 从数据库获取消息（按时间倒序）
-        db_messages = await DBChatMessage.filter(
-            chat_key=chat_key
-        ).order_by('-send_timestamp').limit(message_count)
-        
+        db_messages = (
+            await DBChatMessage.filter(chat_key=chat_key)
+            .order_by("-send_timestamp")
+            .limit(message_count)
+        )
+
         if not db_messages:
-            logger.debug('[PreSearch] 未找到历史消息')
+            logger.debug("[PreSearch] 未找到历史消息")
             return []
-        
+
         # 转换为标准格式（时间正序）
         messages = convert_db_messages_to_dict(db_messages)
         messages.reverse()  # 倒序变正序（最早的在前）
-        
-        logger.debug(f'[PreSearch] 获取到 {len(messages)} 条历史消息')
+
+        logger.debug(f"[PreSearch] 获取到 {len(messages)} 条历史消息")
         return messages
-        
+
     except Exception as exc:
-        logger.warning(f'[PreSearch] 获取历史消息失败: {exc}')
+        logger.warning(f"[PreSearch] 获取历史消息失败: {exc}")
         return []
 
 
 async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
     """
     执行预搜索：获取历史消息 → 生成查询 → 并行搜索 → 格式化结果。
-    
+
     Args:
         _ctx: Agent 上下文
-    
+
     Returns:
         格式化的预搜索结果字符串，失败则返回 None
     """
+    config = get_memory_config()
     try:
-        config = get_memory_config()
-        
         # 1. 获取历史消息
         messages = await _fetch_recent_messages(
-            _ctx,
-            config.PRE_SEARCH_DB_MESSAGE_COUNT
+            _ctx, config.PRE_SEARCH_DB_MESSAGE_COUNT
         )
-        
+
         if not messages:
-            logger.debug('[PreSearch] 无历史消息，跳过预搜索')
+            logger.debug("[PreSearch] 无历史消息，跳过预搜索")
             return None
-        
+
         # 2. 生成查询
         query = build_pre_search_query(
             messages,
             config.PRE_SEARCH_QUERY_MESSAGE_COUNT,
-            config.PRE_SEARCH_QUERY_MAX_LENGTH
+            config.PRE_SEARCH_QUERY_MAX_LENGTH,
         )
-        
+
         if not query:
-            logger.debug('[PreSearch] 无法生成查询，跳过预搜索')
+            logger.debug("[PreSearch] 无法生成查询，跳过预搜索")
             return None
-        
-        logger.info(f'[PreSearch] 生成查询: {query[:100]}...')
-        
+
+        logger.info(f"[PreSearch] 生成查询: {query[:100]}...")
+
         # 3. 解析作用域
         scope = resolve_memory_scope(_ctx)
         if not scope.has_scope():
-            logger.debug('[PreSearch] 无有效作用域，跳过预搜索')
+            logger.debug("[PreSearch] 无有效作用域，跳过预搜索")
             return None
-        
+
         # 4. 确定搜索层级
         layer_order = scope.default_layer_order(
             enable_session_layer=config.SESSION_ISOLATION
         )
-        
+
         # 如果配置跳过 conversation 层，则过滤掉
         if config.PRE_SEARCH_SKIP_CONVERSATION:
-            layer_order = [
-                layer for layer in layer_order
-                if layer != 'conversation'
+            filtered_layer_order = [
+                layer for layer in layer_order if layer != "conversation"
             ]
-        
+            if filtered_layer_order:
+                layer_order = filtered_layer_order
+            else:
+                logger.debug(
+                    "[PreSearch] 跳过 conversation 后无可用层级，回退为仅 conversation 层"
+                )
+
         if not layer_order:
-            logger.debug('[PreSearch] 无可搜索层级，跳过预搜索')
+            logger.debug("[PreSearch] 无可搜索层级，跳过预搜索")
             return None
-        
-        logger.debug(f'[PreSearch] 搜索层级: {layer_order}')
-        
+
+        logger.debug(f"[PreSearch] 搜索层级: {layer_order}")
+
         # 5. 获取 mem0 客户端
         client = await get_mem0_client()
         if client is None:
-            logger.warning('[PreSearch] mem0 客户端初始化失败')
+            logger.warning("[PreSearch] mem0 客户端初始化失败")
             return None
-        
+
         # 6. 并行搜索所有层级
         search_tasks = []
-        valid_layers = []
-        
+
         for layer in layer_order:
             layer_ids = scope.layer_ids(layer)
             if not layer_ids:
                 continue
-            
+
             search_tasks.append(
-                _search_single_layer(
-                    client,
-                    query,
-                    layer_ids,
-                    config.PRE_SEARCH_RESULT_LIMIT,
-                    config
+                asyncio.create_task(
+                    _search_single_layer(
+                        client,
+                        query,
+                        layer_ids,
+                        config.PRE_SEARCH_RESULT_LIMIT,
+                        config,
+                    )
                 )
             )
-            valid_layers.append(layer_ids)
-        
+
         if not search_tasks:
-            logger.debug('[PreSearch] 无有效层级，跳过预搜索')
+            logger.debug("[PreSearch] 无有效层级，跳过预搜索")
             return None
-        
-        # 并行执行（带超时）
-        layer_results = await asyncio.wait_for(
-            asyncio.gather(*search_tasks, return_exceptions=True),
-            timeout=config.PRE_SEARCH_TIMEOUT
+
+        # 并行执行（带总超时）：超时后保留已完成结果，取消未完成任务
+        done, pending = await asyncio.wait(
+            search_tasks,
+            timeout=config.PRE_SEARCH_TIMEOUT,
+            return_when=asyncio.ALL_COMPLETED,
         )
-        
+
+        if pending:
+            logger.warning(
+                f"[PreSearch] 部分超时：{len(pending)}/{len(search_tasks)} 个层级超时，使用已完成结果继续"
+            )
+            for pending_task in pending:
+                pending_task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        layer_results: List[Tuple[str, Any]] = []
+        for done_task in done:
+            if done_task.cancelled():
+                continue
+            result = done_task.result()
+            layer_results.append(result)
+
+        if not layer_results:
+            logger.warning(
+                f"[PreSearch] 所有层级均超时（>{config.PRE_SEARCH_TIMEOUT}s），降级"
+            )
+            return None
+
         # 7. 合并结果并去重
         merged_results: List[Dict[str, Any]] = []
         seen_ids: Set[str] = set()
-        
-        for layer_ids, (layer_name, raw_results) in zip(valid_layers, layer_results):
-            if isinstance(raw_results, Exception):
-                logger.warning(f'[PreSearch] 层级 {layer_name} 搜索异常: {raw_results}')
-                continue
-            
+
+        for layer_name, raw_results in layer_results:
             if raw_results is None:
                 continue
-            
-            annotated = _annotate_results(raw_results, layer_ids['layer'], seen_ids)
+
+            annotated = _annotate_results(raw_results, layer_name, seen_ids)
             merged_results.extend(annotated)
-        
+
         if not merged_results:
-            logger.debug('[PreSearch] 无搜索结果')
+            logger.debug("[PreSearch] 无搜索结果")
             return None
-        
+
         # 8. 按分数排序并限制数量
-        merged_results.sort(key=lambda x: x.get('score', 0), reverse=True)
-        top_results = merged_results[:config.PRE_SEARCH_RESULT_LIMIT * len(layer_order)]
-        
+        merged_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        completed_layer_count = max(1, len(layer_results))
+        top_results = merged_results[
+            : config.PRE_SEARCH_RESULT_LIMIT * completed_layer_count
+        ]
+
         # 9. 格式化结果
         formatted = format_search_output(
-            top_results,
-            threshold=config.MEMORY_SEARCH_SCORE_THRESHOLD
+            top_results, threshold=config.MEMORY_SEARCH_SCORE_THRESHOLD
         )
-        
-        result_text = formatted.get('text', '')
-        if not result_text or result_text == '(无结果)':
+
+        result_text = formatted.get("text", "")
+        if not result_text or result_text == "(无结果)":
             return None
-        
-        logger.info(f'[PreSearch] 成功检索到 {len(top_results)} 条记忆')
+
+        logger.info(f"[PreSearch] 成功检索到 {len(top_results)} 条记忆")
         return result_text
-        
+
     except asyncio.TimeoutError:
-        logger.warning(f'[PreSearch] 超时（>{config.PRE_SEARCH_TIMEOUT}s），降级')
+        logger.warning(f"[PreSearch] 超时（>{config.PRE_SEARCH_TIMEOUT}s），降级")
         return None
     except Exception as exc:
-        logger.warning(f'[PreSearch] 执行失败: {exc}', exc_info=True)
+        logger.warning(f"[PreSearch] 执行失败: {exc}", exc_info=True)
         return None
 
 
@@ -1049,23 +1086,23 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 )
 async def inject_memory_prompt(_ctx: AgentCtx) -> str:
     config = get_memory_config()
-    
+
     # 执行预搜索（优雅降级：任何失败都不影响基础提示）
-    pre_search_section = ''
+    pre_search_section = ""
     if config.PRE_SEARCH_ENABLED:
         try:
             pre_search_results = await _execute_pre_search(_ctx)
             if pre_search_results:
                 pre_search_section = (
-                    '\n\n📚 【预加载记忆】（基于最近对话自动检索）：\n'
+                    "\n\n📚 【预加载记忆】（基于最近对话自动检索）：\n"
                     + pre_search_results
-                    + '\n'
+                    + "\n"
                 )
-                logger.info('[PreSearch] 预搜索结果已注入提示')
+                logger.info("[PreSearch] 预搜索结果已注入提示")
         except Exception as exc:
             # 优雅降级：任何异常都不影响基础提示
-            logger.warning(f'[PreSearch] 预搜索失败，降级到基础提示: {exc}')
-    
+            logger.warning(f"[PreSearch] 预搜索失败，降级到基础提示: {exc}")
+
     scope = resolve_memory_scope(_ctx)
     layer_order = scope.default_layer_order(
         enable_session_layer=config.SESSION_ISOLATION
@@ -1119,23 +1156,28 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "  • 不要用 agent_id 操作 global 层（会失败或返回空）",
         "  • persona 层跨会话共享需要在不同会话中使用相同的 agent_id",
         "",
-        "写入记忆：调用 add_memory(memory, scope_level, user_id?, agent_id?, run_id?, metadata?)",
-        "  • 写入 persona 层：add_memory(memory, agent_id='xxx', scope_level='persona')",
-        "  • 写入 global 层：add_memory(memory, user_id='xxx', scope_level='global')",
-        "  • 写入 conversation 层：add_memory(memory, run_id='xxx', scope_level='conversation')",
+        "🔧 调用上下文约定（必须遵守）：",
+        "  • 在 Nekro Agent 沙盒代码中，_ctx 由运行时自动注入，所有记忆方法都必须把 _ctx 作为第一个参数传入。",
+        "  • 在沙盒外独立脚本调试时，如果没有可用 AgentCtx，请显式传入 None，并同时显式提供 user_id/agent_id/run_id。",
         "",
-        "检索记忆：调用 search_memory(query, layers?, user_id?, agent_id?, run_id?, limit?)",
-        "  • 搜索 persona 层：search_memory(query, agent_id='xxx', layers=['persona'])",
-        "  • 搜索 global 层：search_memory(query, user_id='xxx', layers=['global'])",
-        "  • 跨层搜索：search_memory(query, agent_id='xxx', user_id='xxx', layers=['persona', 'global'])",
+        "写入记忆：调用 add_memory(_ctx, memory, scope_level?, user_id?, agent_id?, run_id?, metadata?)",
+        "  • 写入 persona 层：add_memory(_ctx, memory, agent_id='xxx', scope_level='persona')",
+        "  • 写入 global 层：add_memory(_ctx, memory, user_id='xxx', scope_level='global')",
+        "  • 写入 conversation 层：add_memory(_ctx, memory, run_id='xxx', scope_level='conversation')",
         "",
-        "获取全部记忆：调用 get_all_memory(layers?, user_id?, agent_id?, run_id?, tags?)",
-        "  • 获取 persona 层：get_all_memory(agent_id='xxx', layers=['persona'])",
-        "  • 获取 global 层：get_all_memory(user_id='xxx', layers=['global'])",
+        "检索记忆：调用 search_memory(_ctx, query, layers?, user_id?, agent_id?, run_id?, limit?)",
+        "  • 搜索 persona 层：search_memory(_ctx, query, agent_id='xxx', layers=['persona'])",
+        "  • 搜索 global 层：search_memory(_ctx, query, user_id='xxx', layers=['global'])",
+        "  • 跨层搜索：search_memory(_ctx, query, agent_id='xxx', user_id='xxx', layers=['persona', 'global'])",
+        "  • 沙盒外调试示例：search_memory(None, query, agent_id='xxx', user_id='xxx', layers=['persona', 'global'])",
         "",
-        "更新记忆：调用 update_memory(memory_id, new_memory)，用于修订已存知识。",
-        "删除记忆：调用 delete_memory(memory_id) 删除单条过时/错误记忆。",
-        "批量删除：调用 delete_all_memory(layers?, user_id?, agent_id?, run_id?) 清空作用域。",
+        "获取全部记忆：调用 get_all_memory(_ctx, layers?, user_id?, agent_id?, run_id?, tags?)",
+        "  • 获取 persona 层：get_all_memory(_ctx, agent_id='xxx', layers=['persona'])",
+        "  • 获取 global 层：get_all_memory(_ctx, user_id='xxx', layers=['global'])",
+        "",
+        "更新记忆：调用 update_memory(_ctx, memory_id, new_memory)，用于修订已存知识。",
+        "删除记忆：调用 delete_memory(_ctx, memory_id) 删除单条过时/错误记忆。",
+        "批量删除：调用 delete_all_memory(_ctx, layers?, user_id?, agent_id?, run_id?) 清空作用域。",
         f"当前相似度阈值: {config.MEMORY_SEARCH_SCORE_THRESHOLD}。",
         f"可用层级顺序: {available_layers}。",
     ]
@@ -1162,7 +1204,7 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         lines.append(f"全局层 user_id: {scope.user_id}")
 
     # 将预搜索结果注入到提示开头
-    base_prompt = '\n'.join(lines)
+    base_prompt = "\n".join(lines)
     return pre_search_section + base_prompt
 
 
@@ -1458,7 +1500,9 @@ async def mem_list_cmd(
     scope = _build_scope_from_context(context, options)
     parsed_layers = _parse_layers(layer) if layer else None
     parsed_tags = _parse_tags(tags) if tags else None
-    message_text = await _command_list_memory(scope, layers=parsed_layers, tags=parsed_tags)
+    message_text = await _command_list_memory(
+        scope, layers=parsed_layers, tags=parsed_tags
+    )
     return CmdCtl.success(message_text)
 
 
@@ -1479,7 +1523,9 @@ async def mem_search_cmd(
     options: Dict[str, str] = {}
     scope = _build_scope_from_context(context, options)
     parsed_layers = _parse_layers(layer) if layer else None
-    message_text = await _command_search(scope, query=query, layers=parsed_layers, limit=limit)
+    message_text = await _command_search(
+        scope, query=query, layers=parsed_layers, limit=limit
+    )
     return CmdCtl.success(message_text)
 
 
@@ -1503,7 +1549,9 @@ async def mem_add_cmd(
     scope = _build_scope_from_context(context, options)
     metadata = _parse_metadata(options)
     preferred_layer = layer if layer else None
-    message_text = await _command_add(scope, memory_text=text, preferred_layer=preferred_layer, metadata=metadata)
+    message_text = await _command_add(
+        scope, memory_text=text, preferred_layer=preferred_layer, metadata=metadata
+    )
     return CmdCtl.success(message_text)
 
 
