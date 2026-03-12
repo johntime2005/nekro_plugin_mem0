@@ -43,10 +43,10 @@ class MemoryScope:
         """别名：agent_id 即人设ID。"""
         return self.agent_id
 
-    def available_layers(self) -> dict:
+    def available_layers(self, enable_agent_layer: bool = True) -> dict:
         return {
             "conversation": bool(self.run_id),
-            "persona": bool(self.agent_id),
+            "persona": bool(self.agent_id) and enable_agent_layer,
             "global": bool(self.user_id),
         }
 
@@ -63,37 +63,92 @@ class MemoryScope:
         }
         return mapping.get((layer or "").lower())
 
-    def layer_ids(self, layer: str) -> Optional[dict]:
+    def layer_ids(
+        self,
+        layer: str,
+        enable_agent_layer: bool = True,
+        bind_persona_to_user: bool = False,
+    ) -> Optional[dict]:
         normalized = self._normalize_layer(layer)
         if normalized == "conversation" and self.run_id:
-            return {"layer": "conversation", "user_id": None, "agent_id": None, "run_id": self.run_id}
-        if normalized == "persona" and self.agent_id:
-            return {"layer": "persona", "user_id": None, "agent_id": self.agent_id, "run_id": None}
+            return {
+                "layer": "conversation",
+                "user_id": None,
+                "agent_id": None,
+                "run_id": self.run_id,
+            }
+        if normalized == "persona" and enable_agent_layer and self.agent_id:
+            if bind_persona_to_user:
+                if not self.user_id:
+                    return None
+                return {
+                    "layer": "persona",
+                    "user_id": self.user_id,
+                    "agent_id": self.agent_id,
+                    "run_id": None,
+                }
+            return {
+                "layer": "persona",
+                "user_id": None,
+                "agent_id": self.agent_id,
+                "run_id": None,
+            }
         if normalized == "global" and self.user_id:
-            return {"layer": "global", "user_id": self.user_id, "agent_id": None, "run_id": None}
+            return {
+                "layer": "global",
+                "user_id": self.user_id,
+                "agent_id": None,
+                "run_id": None,
+            }
         return None
 
-    def default_layer_order(self, enable_session_layer: bool = True) -> List[str]:
+    def default_layer_order(
+        self,
+        enable_session_layer: bool = True,
+        enable_agent_layer: bool = True,
+        prefer_long_term: bool = False,
+    ) -> List[str]:
         order: List[str] = []
-        if enable_session_layer and self.run_id:
-            order.append("conversation")
-        if self.agent_id:
-            order.append("persona")
-        if self.user_id:
-            order.append("global")
+        if prefer_long_term:
+            if enable_agent_layer and self.agent_id:
+                order.append("persona")
+            if self.user_id:
+                order.append("global")
+            if enable_session_layer and self.run_id:
+                order.append("conversation")
+        else:
+            if enable_session_layer and self.run_id:
+                order.append("conversation")
+            if enable_agent_layer and self.agent_id:
+                order.append("persona")
+            if self.user_id:
+                order.append("global")
         if not order and self.run_id:
             # 即便关闭会话隔离，仍可在缺省场景下回退到对话层，避免无层级可用
             order.append("conversation")
         return order
 
-    def pick_layer(self, preferred: Optional[str], enable_session_layer: bool = True) -> Optional[str]:
+    def pick_layer(
+        self,
+        preferred: Optional[str],
+        enable_session_layer: bool = True,
+        enable_agent_layer: bool = True,
+        prefer_long_term: bool = False,
+    ) -> Optional[str]:
         """选择最合适的层级，优先使用显式指定，其次按默认优先级。"""
         if preferred:
             normalized = self._normalize_layer(preferred)
-            if normalized and self.layer_ids(normalized):
+            if normalized and self.layer_ids(
+                normalized,
+                enable_agent_layer=enable_agent_layer,
+            ):
                 return normalized
-        for layer in self.default_layer_order(enable_session_layer=enable_session_layer):
-            if self.layer_ids(layer):
+        for layer in self.default_layer_order(
+            enable_session_layer=enable_session_layer,
+            enable_agent_layer=enable_agent_layer,
+            prefer_long_term=prefer_long_term,
+        ):
+            if self.layer_ids(layer, enable_agent_layer=enable_agent_layer):
                 return layer
         return None
 
@@ -135,18 +190,32 @@ def resolve_memory_scope(
             or _normalize(_safe_getattr(ctx, "channel_id", None))
         )
 
-    resolved_agent_id = _normalize(agent_id) or _normalize(persona_id) or _normalize(_safe_getattr(ctx, "agent_id", None) or _safe_getattr(ctx, "bot_id", None))
+    resolved_agent_id = (
+        _normalize(agent_id)
+        or _normalize(persona_id)
+        or _normalize(
+            _safe_getattr(ctx, "agent_id", None) or _safe_getattr(ctx, "bot_id", None)
+        )
+    )
     preset_title = None
     if not resolved_agent_id:
-        preset_id = _safe_getattr(db_chat_channel, "preset_id") if db_chat_channel else None
+        preset_id = (
+            _safe_getattr(db_chat_channel, "preset_id") if db_chat_channel else None
+        )
         if preset_id is not None:
             resolved_agent_id = f"preset:{preset_id}"
         elif db_chat_channel is not None:
             resolved_agent_id = "preset:default"
-        preset_title = _safe_getattr(db_chat_channel, "channel_name") if db_chat_channel else None
+        preset_title = (
+            _safe_getattr(db_chat_channel, "channel_name") if db_chat_channel else None
+        )
 
-    resolved_run_source = _normalize(run_id) or _normalize(_safe_getattr(ctx, "chat_key", None) or _safe_getattr(ctx, "session_id", None))
-    resolved_run_id = get_preset_id(resolved_run_source) if resolved_run_source else None
+    resolved_run_source = _normalize(run_id) or _normalize(
+        _safe_getattr(ctx, "chat_key", None) or _safe_getattr(ctx, "session_id", None)
+    )
+    resolved_run_id = (
+        get_preset_id(resolved_run_source) if resolved_run_source else None
+    )
 
     # 调试日志：记录解析结果
     logger.info(
@@ -155,10 +224,17 @@ def resolve_memory_scope(
         f"run_id={resolved_run_id}, preset_title={preset_title}"
     )
 
-    return MemoryScope(user_id=resolved_user_id, agent_id=resolved_agent_id, run_id=resolved_run_id, preset_title=preset_title)
+    return MemoryScope(
+        user_id=resolved_user_id,
+        agent_id=resolved_agent_id,
+        run_id=resolved_run_id,
+        preset_title=preset_title,
+    )
 
 
-def get_model_group_info(model_name: str, expected_type: Optional[str] = None) -> ModelConfigGroup:
+def get_model_group_info(
+    model_name: str, expected_type: Optional[str] = None
+) -> ModelConfigGroup:
     """根据模型组名称获取配置，必要时校验模型类型。"""
     try:
         group = core_config.MODEL_GROUPS[model_name]
@@ -166,5 +242,7 @@ def get_model_group_info(model_name: str, expected_type: Optional[str] = None) -
         raise ValueError(f"模型组 '{model_name}' 不存在，请确认配置正确") from exc
 
     if expected_type and group.MODEL_TYPE != expected_type:
-        logger.warning(f"模型组 '{model_name}' 类型为 '{group.MODEL_TYPE}'，与期望的 '{expected_type}' 不一致")
+        logger.warning(
+            f"模型组 '{model_name}' 类型为 '{group.MODEL_TYPE}'，与期望的 '{expected_type}' 不一致"
+        )
     return group

@@ -25,9 +25,14 @@ from .mem0_output_formatter import (
 )
 from .mem0_utils import get_mem0_client
 from .plugin import get_memory_config, plugin
-from .utils import MemoryScope, get_preset_id, resolve_memory_scope
+from .utils import MemoryScope, decode_id, get_preset_id, resolve_memory_scope
 from nekro_agent.models.db_chat_message import DBChatMessage
 from .pre_search_utils import build_pre_search_query, convert_db_messages_to_dict
+
+
+_MIGRATION_IN_FLIGHT: Set[Tuple[Optional[str], Optional[str], Optional[str], str]] = (
+    set()
+)
 
 
 def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
@@ -56,14 +61,24 @@ def _fire_and_forget(coro) -> None:
 
 
 def _build_layer_order(
-    scope, layers: Optional[List[str]], preferred: Optional[str], session_enabled: bool
+    scope,
+    layers: Optional[List[str]],
+    preferred: Optional[str],
+    session_enabled: bool,
+    agent_enabled: bool,
+    bind_persona_to_user: bool,
+    prefer_long_term: bool = False,
 ) -> List[str]:
     # 当用户显式提供 layers 时，这里进行标准化与校验，避免后续出现静默跳过的无效层级。
     if layers:
         normalized_layers: List[str] = []
         for layer in layers:
             # 使用 scope.layer_ids 来判断层级是否有效，并获取规范化后的层级名称（如果有）
-            layer_info = scope.layer_ids(layer)
+            layer_info = scope.layer_ids(
+                layer,
+                enable_agent_layer=agent_enabled,
+                bind_persona_to_user=bind_persona_to_user,
+            )
             if not layer_info:
                 continue
             canonical_name = layer_info.get("layer", layer)
@@ -74,7 +89,11 @@ def _build_layer_order(
 
     # Derive the default order once so we can both validate `preferred`
     # and provide a sensible fallback when it is invalid.
-    default_order = scope.default_layer_order(enable_session_layer=session_enabled)
+    default_order = scope.default_layer_order(
+        enable_session_layer=session_enabled,
+        enable_agent_layer=agent_enabled,
+        prefer_long_term=prefer_long_term,
+    )
 
     if preferred:
         # Normalize and validate preferred layer name against known layers.
@@ -95,6 +114,16 @@ def _build_layer_order(
         )
 
     return default_order
+
+
+def _resolve_layer_ids(
+    scope: MemoryScope, layer: str, config: Any
+) -> Optional[Dict[str, Any]]:
+    return scope.layer_ids(
+        layer,
+        enable_agent_layer=config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=config.PERSONA_BIND_USER,
+    )
 
 
 def _annotate_results(
@@ -198,6 +227,266 @@ def _build_scope_from_context(
     return MemoryScope(user_id=user_id, agent_id=agent_id, run_id=run_id)
 
 
+def _build_legacy_value_candidates(layer: str, value: Optional[str]) -> List[str]:
+    """构造旧作用域兼容候选值（用于读取回退）。"""
+    normalized = _normalize_cli_value(value)
+    if not normalized:
+        return []
+
+    candidates: List[str] = [normalized]
+
+    if layer == "global":
+        if normalized.startswith("private_") and normalized[8:].isdigit():
+            candidates.append(normalized[8:])
+        elif normalized.isdigit():
+            candidates.append(f"private_{normalized}")
+
+    if layer == "persona":
+        if normalized.startswith("preset:"):
+            raw = normalized.split(":", 1)[1]
+            if raw:
+                candidates.append(raw)
+        else:
+            candidates.append(f"preset:{normalized}")
+
+    if layer == "conversation":
+        try:
+            decoded = decode_id(normalized)
+            if decoded:
+                candidates.append(decoded)
+                candidates.append(get_preset_id(decoded))
+        except Exception:
+            # 不是有效 base64 时直接忽略
+            pass
+
+    deduped: List[str] = []
+    for item in candidates:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def _build_legacy_layer_variants(layer_ids: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """基于当前层级ID构造兼容读取候选层级。"""
+    layer = layer_ids.get("layer")
+    if layer not in {"global", "persona", "conversation"}:
+        return []
+
+    key_by_layer = {
+        "global": "user_id",
+        "persona": "agent_id",
+        "conversation": "run_id",
+    }
+    key = key_by_layer[layer]
+    current_value = layer_ids.get(key)
+    candidates = _build_legacy_value_candidates(layer, current_value)
+
+    variants: List[Dict[str, Any]] = []
+    for value in candidates:
+        variant = {
+            "layer": layer,
+            "user_id": None,
+            "agent_id": None,
+            "run_id": None,
+        }
+        variant[key] = value
+        variants.append(variant)
+
+    unique_variants: List[Dict[str, Any]] = []
+    seen: Set[Tuple[Optional[str], Optional[str], Optional[str]]] = set()
+    for variant in variants:
+        fingerprint = (
+            variant.get("user_id"),
+            variant.get("agent_id"),
+            variant.get("run_id"),
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique_variants.append(variant)
+    return unique_variants
+
+
+def _layer_query_kwargs(
+    layer_ids: Dict[str, Any], plugin_config: Any
+) -> Dict[str, Any]:
+    _ = plugin_config
+    return {
+        "user_id": layer_ids.get("user_id"),
+        "agent_id": layer_ids.get("agent_id"),
+        "run_id": layer_ids.get("run_id"),
+    }
+
+
+async def _migrate_records_to_target_layer(
+    client: Any,
+    raw_results: Any,
+    target_layer_ids: Dict[str, Any],
+    plugin_config: Any,
+) -> None:
+    """将兼容读取命中的旧作用域记忆复制到当前目标作用域。"""
+    _ = plugin_config
+    target_layer = target_layer_ids.get("layer")
+    migrated = 0
+    seen: Set[str] = set()
+    for item in normalize_results(raw_results):
+        memory_id = _memory_identifier(item) or ""
+        if memory_id and memory_id in seen:
+            continue
+        if memory_id:
+            seen.add(memory_id)
+
+        memory_text = item.get("memory") or item.get("text") or item.get("content")
+        if not memory_text:
+            continue
+
+        metadata = dict(item.get("metadata") or {})
+        metadata.setdefault("_migrated_from_legacy_scope", True)
+        if memory_id:
+            metadata.setdefault("_source_memory_id", memory_id)
+
+        await asyncio.to_thread(
+            client.add,
+            memory_text,
+            user_id=target_layer_ids["user_id"],
+            agent_id=target_layer_ids["agent_id"],
+            run_id=target_layer_ids["run_id"],
+            metadata=metadata,
+            infer=False,
+        )
+        migrated += 1
+
+    if migrated:
+        logger.info(f"[Memory] 自动迁移完成：已复制 {migrated} 条到 {target_layer} 层")
+
+
+def _schedule_migration_once(
+    *,
+    client: Any,
+    legacy_records: List[Dict[str, Any]],
+    target_layer_ids: Dict[str, Any],
+    plugin_config: Any,
+) -> None:
+    migration_key = (
+        target_layer_ids.get("user_id"),
+        target_layer_ids.get("agent_id"),
+        target_layer_ids.get("run_id"),
+        str(target_layer_ids.get("layer") or ""),
+    )
+    if migration_key in _MIGRATION_IN_FLIGHT:
+        return
+    _MIGRATION_IN_FLIGHT.add(migration_key)
+
+    async def _runner() -> None:
+        try:
+            await _migrate_records_to_target_layer(
+                client=client,
+                raw_results=legacy_records,
+                target_layer_ids=target_layer_ids,
+                plugin_config=plugin_config,
+            )
+        except Exception as exc:
+            logger.error(f"[Memory] 自动迁移失败: {exc}")
+        finally:
+            _MIGRATION_IN_FLIGHT.discard(migration_key)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        logger.error("[Memory] 无法提交自动迁移任务：没有运行中的事件循环")
+
+
+async def _read_with_legacy_fallback(
+    *,
+    client: Any,
+    layer_ids: Dict[str, Any],
+    plugin_config: Any,
+    op: str,
+    query: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """读取指定层级，并在启用时回退读取旧作用域格式。"""
+    if op not in {"search", "get_all"}:
+        raise ValueError(f"unsupported op: {op}")
+
+    def _id_fingerprint(
+        ids: Dict[str, Any],
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        return (ids.get("user_id"), ids.get("agent_id"), ids.get("run_id"))
+
+    primary_kwargs = _layer_query_kwargs(layer_ids, plugin_config)
+    if op == "search":
+        if not query:
+            return [], False
+        primary_raw = await asyncio.to_thread(
+            client.search,
+            query=query,
+            limit=limit or 5,
+            **primary_kwargs,
+        )
+    else:
+        primary_raw = await asyncio.to_thread(client.get_all, **primary_kwargs)
+
+    merged = normalize_results(primary_raw)
+    has_primary = bool(merged)
+    seen_ids: Set[str] = set()
+    for item in merged:
+        memory_id = _memory_identifier(item)
+        if memory_id:
+            seen_ids.add(memory_id)
+
+    legacy_hit = False
+    if not getattr(plugin_config, "LEGACY_SCOPE_FALLBACK_ENABLED", True):
+        return merged, legacy_hit
+
+    target_fingerprint = _id_fingerprint(layer_ids)
+    allow_auto_migrate = getattr(plugin_config, "AUTO_MIGRATE_ON_READ", False)
+    if allow_auto_migrate and op == "search" and (not has_primary):
+        # search 的空结果不代表目标层无数据（可能只是查询词未命中），避免误迁移。
+        existence_probe = await asyncio.to_thread(client.get_all, **primary_kwargs)
+        has_primary = bool(normalize_results(existence_probe))
+
+    for variant in _build_legacy_layer_variants(layer_ids):
+        if _id_fingerprint(variant) == target_fingerprint:
+            continue
+
+        legacy_kwargs = _layer_query_kwargs(variant, plugin_config)
+        if op == "search":
+            legacy_raw = await asyncio.to_thread(
+                client.search,
+                query=query,
+                limit=limit or 5,
+                **legacy_kwargs,
+            )
+        else:
+            legacy_raw = await asyncio.to_thread(client.get_all, **legacy_kwargs)
+
+        legacy_records = normalize_results(legacy_raw)
+        if not legacy_records:
+            continue
+
+        legacy_hit = True
+        for record in legacy_records:
+            memory_id = _memory_identifier(record)
+            if memory_id and memory_id in seen_ids:
+                continue
+            if memory_id:
+                seen_ids.add(memory_id)
+            merged.append(record)
+
+        # 自动迁移采用保守策略：仅当新作用域当前为空时，才把旧作用域结果复制到新作用域
+        if allow_auto_migrate and (not has_primary) and legacy_records:
+            _schedule_migration_once(
+                client=client,
+                legacy_records=legacy_records,
+                target_layer_ids=layer_ids,
+                plugin_config=plugin_config,
+            )
+
+    return merged, legacy_hit
+
+
 def _format_command_error(message: str) -> str:
     return f"❌ {message}"
 
@@ -278,14 +567,17 @@ async def add_memory(
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法写入记忆"}
 
     target_layer = scope.pick_layer(
-        preferred=scope_level, enable_session_layer=plugin_config.SESSION_ISOLATION
+        preferred=scope_level,
+        enable_session_layer=plugin_config.SESSION_ISOLATION,
+        enable_agent_layer=plugin_config.ENABLE_AGENT_SCOPE,
+        prefer_long_term=True,
     )
     logger.info(
         f"[Memory] 选择层级 - target_layer={target_layer}, SESSION_ISOLATION={plugin_config.SESSION_ISOLATION}, "
         f"ENABLE_AGENT_SCOPE={plugin_config.ENABLE_AGENT_SCOPE}"
     )
 
-    layer_ids = scope.layer_ids(target_layer or "")
+    layer_ids = _resolve_layer_ids(scope, target_layer or "", plugin_config)
     if layer_ids is None:
         return {
             "ok": False,
@@ -297,12 +589,8 @@ async def add_memory(
         asyncio.to_thread(
             client.add,
             memory,
-            user_id=layer_ids["user_id"]
-            if plugin_config.ENABLE_AGENT_SCOPE or target_layer == "global"
-            else None,
-            agent_id=layer_ids["agent_id"]
-            if plugin_config.ENABLE_AGENT_SCOPE or target_layer == "persona"
-            else None,
+            user_id=layer_ids["user_id"],
+            agent_id=layer_ids["agent_id"],
             run_id=layer_ids["run_id"],
             metadata=metadata or {},
             infer=False,
@@ -383,6 +671,8 @@ async def search_memory(
         layers=layers,
         preferred=scope_level,
         session_enabled=plugin_config.SESSION_ISOLATION,
+        agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
     )
     if not layer_order:
         return {"ok": False, "error": "未找到可搜索的层级"}
@@ -390,37 +680,19 @@ async def search_memory(
     merged_results: List[Dict[str, Any]] = []
     seen_ids: Set[str] = set()
     for layer in layer_order:
-        layer_ids = scope.layer_ids(layer)
+        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
         if not layer_ids:
             continue
-        search_run_id = (
-            layer_ids["run_id"]
-            if plugin_config.SESSION_ISOLATION or layer_ids["layer"] == "conversation"
-            else None
+        raw_results, legacy_hit = await _read_with_legacy_fallback(
+            client=client,
+            layer_ids=layer_ids,
+            plugin_config=plugin_config,
+            op="search",
+            query=query,
+            limit=limit,
         )
-        search_agent_id = (
-            layer_ids["agent_id"]
-            if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona"
-            else None
-        )
-        search_user_id = (
-            layer_ids["user_id"] if layer_ids["layer"] == "global" else None
-        )
-
-        # mem0 v1.0.0 compatibility: threshold is removed, we rely on post-filtering
-        search_kwargs = {
-            "query": query,
-            "user_id": search_user_id,
-            "agent_id": search_agent_id,
-            "run_id": search_run_id,
-            "limit": limit,
-        }
-
-        # NOTE: Do NOT use filters for score/threshold for OSS backends (Qdrant/Chroma)
-        # as they don't support dynamic score filtering in the search query.
-        # We handle threshold filtering in format_search_output instead.
-
-        raw_results = await asyncio.to_thread(client.search, **search_kwargs)
+        if legacy_hit:
+            logger.info(f"[Memory] 层级 {layer} 触发旧作用域兼容读取")
         merged_results.extend(
             _annotate_results(raw_results, layer_ids["layer"], seen_ids)
         )
@@ -504,6 +776,8 @@ async def get_all_memory(
         layers=layers,
         preferred=scope_level,
         session_enabled=plugin_config.SESSION_ISOLATION,
+        agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
     )
     if not layer_order:
         return {"ok": False, "error": "未找到可获取的层级"}
@@ -511,19 +785,17 @@ async def get_all_memory(
     merged_results: List[Dict[str, Any]] = []
     seen_ids: Set[str] = set()
     for layer in layer_order:
-        layer_ids = scope.layer_ids(layer)
+        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
         if not layer_ids:
             continue
-        raw = await asyncio.to_thread(
-            client.get_all,
-            user_id=layer_ids["user_id"] if layer_ids["layer"] == "global" else None,
-            agent_id=layer_ids["agent_id"]
-            if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona"
-            else None,
-            run_id=layer_ids["run_id"]
-            if layer_ids["layer"] == "conversation"
-            else None,
+        raw, legacy_hit = await _read_with_legacy_fallback(
+            client=client,
+            layer_ids=layer_ids,
+            plugin_config=plugin_config,
+            op="get_all",
         )
+        if legacy_hit:
+            logger.info(f"[Memory] 层级 {layer} 触发旧作用域兼容读取")
         merged_results.extend(_annotate_results(raw, layer_ids["layer"], seen_ids))
 
     formatted = format_get_all_output(merged_results, tags=tags)
@@ -673,6 +945,8 @@ async def delete_all_memory(
         layers=layers,
         preferred=scope_level,
         session_enabled=plugin_config.SESSION_ISOLATION,
+        agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
     )
     if not layer_order:
         return {"ok": False, "error": "未找到可删除的层级"}
@@ -680,7 +954,7 @@ async def delete_all_memory(
     # 收集需要删除的层级信息，提交到后台执行
     target_layers: List[str] = []
     for layer in layer_order:
-        layer_ids = scope.layer_ids(layer)
+        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
         if not layer_ids:
             continue
         target_layers.append(layer_ids["layer"])
@@ -688,15 +962,9 @@ async def delete_all_memory(
         async def _do_delete_all(_layer_ids=layer_ids):
             await asyncio.to_thread(
                 client.delete_all,
-                user_id=_layer_ids["user_id"]
-                if _layer_ids["layer"] == "global"
-                else None,
-                agent_id=_layer_ids["agent_id"]
-                if plugin_config.ENABLE_AGENT_SCOPE or _layer_ids["layer"] == "persona"
-                else None,
-                run_id=_layer_ids["run_id"]
-                if _layer_ids["layer"] == "conversation"
-                else None,
+                user_id=_layer_ids["user_id"],
+                agent_id=_layer_ids["agent_id"],
+                run_id=_layer_ids["run_id"],
             )
 
         _fire_and_forget(_do_delete_all())
@@ -847,28 +1115,18 @@ async def _search_single_layer(
     """
     layer = layer_ids["layer"]
 
-    # 构建搜索参数
-    search_kwargs = {
-        "query": query,
-        "limit": limit,
-    }
-
-    # 根据层级设置标识符
-    if layer == "global":
-        search_kwargs["user_id"] = layer_ids["user_id"]
-    elif layer == "persona":
-        search_kwargs["agent_id"] = layer_ids["agent_id"]
-        if config.ENABLE_AGENT_SCOPE:
-            search_kwargs["user_id"] = None
-    elif layer == "conversation":
-        search_kwargs["run_id"] = layer_ids["run_id"]
-        if config.SESSION_ISOLATION:
-            search_kwargs["user_id"] = None
-            search_kwargs["agent_id"] = None
-
-    # 执行搜索（包装同步调用为异步）
+    # 执行搜索（含旧作用域兼容回退）
     try:
-        results = await asyncio.to_thread(client.search, **search_kwargs)
+        results, legacy_hit = await _read_with_legacy_fallback(
+            client=client,
+            layer_ids=layer_ids,
+            plugin_config=config,
+            op="search",
+            query=query,
+            limit=limit,
+        )
+        if legacy_hit:
+            logger.info(f"[PreSearch] 层级 {layer} 触发旧作用域兼容读取")
         return (layer, results)
     except Exception as exc:
         logger.warning(f"[Memory] 层级 {layer} 搜索失败: {exc}")
@@ -959,7 +1217,8 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 
         # 4. 确定搜索层级
         layer_order = scope.default_layer_order(
-            enable_session_layer=config.SESSION_ISOLATION
+            enable_session_layer=config.SESSION_ISOLATION,
+            enable_agent_layer=config.ENABLE_AGENT_SCOPE,
         )
 
         # 如果配置跳过 conversation 层，则过滤掉
@@ -990,7 +1249,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
         search_tasks = []
 
         for layer in layer_order:
-            layer_ids = scope.layer_ids(layer)
+            layer_ids = _resolve_layer_ids(scope, layer, config)
             if not layer_ids:
                 continue
 
@@ -1105,7 +1364,8 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
 
     scope = resolve_memory_scope(_ctx)
     layer_order = scope.default_layer_order(
-        enable_session_layer=config.SESSION_ISOLATION
+        enable_session_layer=config.SESSION_ISOLATION,
+        enable_agent_layer=config.ENABLE_AGENT_SCOPE,
     )
     available_layers = ", ".join(layer_order) if layer_order else "无可用层级"
     lines = [
@@ -1186,6 +1446,10 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         lines.append(
             "已启用 Agent/人设 级记忆：同一人设可在多会话间共享知识，不同人设彼此隔离。"
         )
+        if config.PERSONA_BIND_USER:
+            lines.append(
+                "persona 层已启用用户绑定：同一 agent_id 在不同用户之间不会共享记忆。"
+            )
     else:
         lines.append("未启用 Agent 级记忆：记忆主要按用户/会话维度隔离。")
 
@@ -1232,6 +1496,8 @@ async def _command_list_memory(
         layers=layers,
         preferred=None,
         session_enabled=plugin_config.SESSION_ISOLATION,
+        agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
     )
     logger.info(
         f"[Memory] 层级顺序: {layer_order}, SESSION_ISOLATION={plugin_config.SESSION_ISOLATION}"
@@ -1243,20 +1509,14 @@ async def _command_list_memory(
     merged_results: List[Dict[str, Any]] = []
     seen_ids: Set[str] = set()
     for layer in layer_order:
-        layer_ids = scope.layer_ids(layer)
+        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
         if not layer_ids:
             logger.warning(f"[Memory] 跳过层级 {layer}，layer_ids 为空")
             continue
 
-        query_user_id = layer_ids["user_id"] if layer_ids["layer"] == "global" else None
-        query_agent_id = (
-            layer_ids["agent_id"]
-            if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona"
-            else None
-        )
-        query_run_id = (
-            layer_ids["run_id"] if layer_ids["layer"] == "conversation" else None
-        )
+        query_user_id = layer_ids["user_id"]
+        query_agent_id = layer_ids["agent_id"]
+        query_run_id = layer_ids["run_id"]
 
         logger.info(
             f"[Memory] 查询层级 {layer} - user_id={query_user_id}, "
@@ -1264,12 +1524,14 @@ async def _command_list_memory(
             f"ENABLE_AGENT_SCOPE={plugin_config.ENABLE_AGENT_SCOPE}"
         )
 
-        raw = await asyncio.to_thread(
-            client.get_all,
-            user_id=query_user_id,
-            agent_id=query_agent_id,
-            run_id=query_run_id,
+        raw, legacy_hit = await _read_with_legacy_fallback(
+            client=client,
+            layer_ids=layer_ids,
+            plugin_config=plugin_config,
+            op="get_all",
         )
+        if legacy_hit:
+            logger.info(f"[Memory] 层级 {layer} 触发旧作用域兼容读取")
         logger.info(f"[Memory] 层级 {layer} 返回 {len(raw) if raw else 0} 条记忆")
         merged_results.extend(_annotate_results(raw, layer_ids["layer"], seen_ids))
 
@@ -1303,6 +1565,8 @@ async def _command_clear_memory(scope: MemoryScope, layers: Optional[List[str]])
         layers=layers,
         preferred=None,
         session_enabled=plugin_config.SESSION_ISOLATION,
+        agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
     )
     if not layer_order:
         return _format_command_error("未找到可删除的层级。")
@@ -1310,20 +1574,14 @@ async def _command_clear_memory(scope: MemoryScope, layers: Optional[List[str]])
     deleted_layers: List[str] = []
     try:
         for layer in layer_order:
-            layer_ids = scope.layer_ids(layer)
+            layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
             if not layer_ids:
                 continue
             await asyncio.to_thread(
                 client.delete_all,
-                user_id=layer_ids["user_id"]
-                if layer_ids["layer"] == "global"
-                else None,
-                agent_id=layer_ids["agent_id"]
-                if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona"
-                else None,
-                run_id=layer_ids["run_id"]
-                if layer_ids["layer"] == "conversation"
-                else None,
+                user_id=layer_ids["user_id"],
+                agent_id=layer_ids["agent_id"],
+                run_id=layer_ids["run_id"],
             )
             deleted_layers.append(layer_ids["layer"])
     except Exception as exc:  # pragma: no cover
@@ -1369,6 +1627,8 @@ async def _command_search(
         layers=layers,
         preferred=None,
         session_enabled=plugin_config.SESSION_ISOLATION,
+        agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
     )
     logger.info(
         f"[Memory] 搜索层级顺序: {layer_order}, SESSION_ISOLATION={plugin_config.SESSION_ISOLATION}"
@@ -1380,38 +1640,29 @@ async def _command_search(
     merged_results: List[Dict[str, Any]] = []
     seen_ids: Set[str] = set()
     for layer in layer_order:
-        layer_ids = scope.layer_ids(layer)
+        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
         if not layer_ids:
             logger.warning(f"[Memory] 搜索跳过层级 {layer}，layer_ids 为空")
             continue
-        search_run_id = (
-            layer_ids["run_id"]
-            if plugin_config.SESSION_ISOLATION or layer_ids["layer"] == "conversation"
-            else None
-        )
-        search_agent_id = (
-            layer_ids["agent_id"]
-            if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona"
-            else None
-        )
-        search_user_id = (
-            layer_ids["user_id"] if layer_ids["layer"] == "global" else None
-        )
+        search_run_id = layer_ids["run_id"]
+        search_agent_id = layer_ids["agent_id"]
+        search_user_id = layer_ids["user_id"]
 
         logger.info(
             f"[Memory] 在层级 {layer} 搜索 - user_id={search_user_id}, "
             f"agent_id={search_agent_id}, run_id={search_run_id}"
         )
 
-        search_kwargs = {
-            "query": query,
-            "user_id": search_user_id,
-            "agent_id": search_agent_id,
-            "run_id": search_run_id,
-            "limit": limit,
-        }
-
-        raw_results = await asyncio.to_thread(client.search, **search_kwargs)
+        raw_results, legacy_hit = await _read_with_legacy_fallback(
+            client=client,
+            layer_ids=layer_ids,
+            plugin_config=plugin_config,
+            op="search",
+            query=query,
+            limit=limit,
+        )
+        if legacy_hit:
+            logger.info(f"[Memory] 层级 {layer} 触发旧作用域兼容读取")
         logger.info(
             f"[Memory] 层级 {layer} 搜索返回 {len(raw_results) if raw_results else 0} 条结果"
         )
@@ -1442,9 +1693,12 @@ async def _command_add(
         return _format_command_error("缺少 user_id/agent_id/run_id，无法写入记忆。")
 
     target_layer = scope.pick_layer(
-        preferred=preferred_layer, enable_session_layer=plugin_config.SESSION_ISOLATION
+        preferred=preferred_layer,
+        enable_session_layer=plugin_config.SESSION_ISOLATION,
+        enable_agent_layer=plugin_config.ENABLE_AGENT_SCOPE,
+        prefer_long_term=True,
     )
-    layer_ids = scope.layer_ids(target_layer or "")
+    layer_ids = _resolve_layer_ids(scope, target_layer or "", plugin_config)
     if layer_ids is None:
         return _format_command_error(
             "未能确定可用的记忆层级，请提供 layer 或 user_id/agent_id/run_id。"
@@ -1454,12 +1708,8 @@ async def _command_add(
         result = await asyncio.to_thread(
             client.add,
             memory_text,
-            user_id=layer_ids["user_id"]
-            if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "global"
-            else None,
-            agent_id=layer_ids["agent_id"]
-            if plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona"
-            else None,
+            user_id=layer_ids["user_id"],
+            agent_id=layer_ids["agent_id"],
             run_id=layer_ids["run_id"],
             metadata=metadata or {},
             infer=False,
@@ -1487,16 +1737,25 @@ mem_group = plugin.mount_command_group(
     name="list",
     description="列出当前作用域的记忆",
     aliases=["ls"],
-    usage="mem.list [layer=global|persona|conversation] [tags=TAG1,TAG2]",
+    usage="mem.list [layer=global|persona|conversation] [tags=TAG1,TAG2] [user=xxx] [agent=xxx] [run=xxx]",
 )
 async def mem_list_cmd(
     context: CommandExecutionContext,
     layer: Annotated[str, Arg("层级过滤", positional=True)] = "",
     tags: Annotated[str, Arg("标签过滤（逗号分隔）")] = "",
+    user: Annotated[str, Arg("用户作用域ID")] = "",
+    agent: Annotated[str, Arg("人设作用域ID")] = "",
+    run: Annotated[str, Arg("会话作用域ID")] = "",
 ) -> CommandResponse:
     options: Dict[str, str] = {}
     if layer:
         options["layer"] = layer
+    if user:
+        options["user"] = user
+    if agent:
+        options["agent"] = agent
+    if run:
+        options["run"] = run
     scope = _build_scope_from_context(context, options)
     parsed_layers = _parse_layers(layer) if layer else None
     parsed_tags = _parse_tags(tags) if tags else None
@@ -1510,17 +1769,26 @@ async def mem_list_cmd(
     name="search",
     description="语义搜索记忆",
     aliases=["s"],
-    usage="mem.search <query> [layer=xxx] [limit=5]",
+    usage="mem.search <query> [layer=xxx] [limit=5] [user=xxx] [agent=xxx] [run=xxx]",
 )
 async def mem_search_cmd(
     context: CommandExecutionContext,
     query: Annotated[str, Arg("搜索关键词", positional=True, greedy=True)] = "",
     layer: Annotated[str, Arg("层级过滤")] = "",
     limit: Annotated[int, Arg("返回数量上限", range=(1, 50))] = 5,
+    user: Annotated[str, Arg("用户作用域ID")] = "",
+    agent: Annotated[str, Arg("人设作用域ID")] = "",
+    run: Annotated[str, Arg("会话作用域ID")] = "",
 ) -> CommandResponse:
     if not query:
         return CmdCtl.failed("用法: mem.search <query> [layer=xxx] [limit=5]")
     options: Dict[str, str] = {}
+    if user:
+        options["user"] = user
+    if agent:
+        options["agent"] = agent
+    if run:
+        options["run"] = run
     scope = _build_scope_from_context(context, options)
     parsed_layers = _parse_layers(layer) if layer else None
     message_text = await _command_search(
@@ -1533,19 +1801,28 @@ async def mem_search_cmd(
     name="add",
     description="添加一条记忆",
     aliases=["a"],
-    usage="mem.add <文本> [layer=xxx] [tag=TYPE]",
+    usage="mem.add <文本> [layer=xxx] [tag=TYPE] [user=xxx] [agent=xxx] [run=xxx]",
 )
 async def mem_add_cmd(
     context: CommandExecutionContext,
     text: Annotated[str, Arg("记忆内容", positional=True, greedy=True)] = "",
     layer: Annotated[str, Arg("目标层级")] = "",
     tag: Annotated[str, Arg("记忆标签")] = "",
+    user: Annotated[str, Arg("用户作用域ID")] = "",
+    agent: Annotated[str, Arg("人设作用域ID")] = "",
+    run: Annotated[str, Arg("会话作用域ID")] = "",
 ) -> CommandResponse:
     if not text:
         return CmdCtl.failed("用法: mem.add <文本> [layer=xxx] [tag=TYPE]")
     options: Dict[str, str] = {}
     if tag:
         options["tag"] = tag
+    if user:
+        options["user"] = user
+    if agent:
+        options["agent"] = agent
+    if run:
+        options["run"] = run
     scope = _build_scope_from_context(context, options)
     metadata = _parse_metadata(options)
     preferred_layer = layer if layer else None
@@ -1575,14 +1852,23 @@ async def mem_delete_cmd(
     name="clear",
     description="清空指定层级的全部记忆（危险操作）",
     aliases=["purge"],
-    usage="mem.clear [layer=conversation|persona|global]",
+    usage="mem.clear [layer=conversation|persona|global] [user=xxx] [agent=xxx] [run=xxx]",
     permission=CommandPermission.ADVANCED,
 )
 async def mem_clear_cmd(
     context: CommandExecutionContext,
     layer: Annotated[str, Arg("目标层级", positional=True)] = "",
+    user: Annotated[str, Arg("用户作用域ID")] = "",
+    agent: Annotated[str, Arg("人设作用域ID")] = "",
+    run: Annotated[str, Arg("会话作用域ID")] = "",
 ) -> CommandResponse:
     options: Dict[str, str] = {}
+    if user:
+        options["user"] = user
+    if agent:
+        options["agent"] = agent
+    if run:
+        options["run"] = run
     scope = _build_scope_from_context(context, options)
     parsed_layers = _parse_layers(layer) if layer else None
     message_text = await _command_clear_memory(scope, layers=parsed_layers)

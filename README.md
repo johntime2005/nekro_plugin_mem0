@@ -81,7 +81,10 @@ class MemoryConfig(ConfigBase):
 - `COLLECTION_NAME`：控制向量库集合名称，便于与既有实例隔离/共享。
 - `ENABLE_AGENT_SCOPE`：开启后会为同一 Agent 写入一份可跨会话复用的记忆；关闭则仅按用户/会话维度写入。
 - `SESSION_ISOLATION`：为 `True` 时搜索会优先使用会话 `run_id` 限定结果；设为 `False` 则基于用户/Agent 级别跨会话聚合记忆，满足多轮互通。
+- `PERSONA_BIND_USER`：为 `True`（默认）时，persona 层会同时使用 `user_id + agent_id` 进行隔离，避免不同用户因为同一 agent_id 产生记忆串用。
 - `REDIS_URL`：当 `VECTOR_DB=redis` 时生效，形如 `redis://redis:6379/0`；生产环境请将 Redis 数据目录挂载卷以获得持久化，并可通过更换 URL 在服务器间迁移。
+- `LEGACY_SCOPE_FALLBACK_ENABLED`：为 `True`（默认）时，读取会自动回退尝试旧作用域格式（旧 user/agent/run 编码），升级后历史记忆可见性更好。
+- `AUTO_MIGRATE_ON_READ`：为 `True` 时，若回退命中旧作用域且新作用域当前为空，会把旧记忆复制到新作用域（默认关闭，建议灰度开启）。
 
 ## 🛠️ 可用函数 (Agent 可调用)
 
