@@ -126,6 +126,36 @@ def _resolve_layer_ids(
     )
 
 
+def _resolve_read_layer_ids(
+    scope: MemoryScope, layer: str, config: Any
+) -> Optional[Dict[str, Any]]:
+    resolved = _resolve_layer_ids(scope, layer, config)
+    if resolved:
+        return resolved
+
+    normalized = (layer or "").strip().lower()
+    persona_aliases = {"persona", "preset", "agent"}
+    if (
+        normalized in persona_aliases
+        and getattr(config, "PERSONA_BIND_USER", False)
+        and getattr(config, "ENABLE_AGENT_SCOPE", True)
+        and scope.agent_id
+        and not scope.user_id
+    ):
+        fallback = scope.layer_ids(
+            "persona",
+            enable_agent_layer=config.ENABLE_AGENT_SCOPE,
+            bind_persona_to_user=False,
+        )
+        if fallback:
+            logger.info(
+                "[Memory] persona 读取回退：当前上下文无 user_id，使用仅 agent_id 兼容读取"
+            )
+            return fallback
+
+    return None
+
+
 def _annotate_results(
     raw_results: Any, layer: str, seen_ids: Set[str]
 ) -> List[Dict[str, Any]]:
@@ -311,11 +341,12 @@ def _layer_query_kwargs(
     layer_ids: Dict[str, Any], plugin_config: Any
 ) -> Dict[str, Any]:
     _ = plugin_config
-    return {
-        "user_id": layer_ids.get("user_id"),
-        "agent_id": layer_ids.get("agent_id"),
-        "run_id": layer_ids.get("run_id"),
-    }
+    query_kwargs: Dict[str, Any] = {}
+    for key in ("user_id", "agent_id", "run_id"):
+        value = layer_ids.get(key)
+        if value is not None:
+            query_kwargs[key] = value
+    return query_kwargs
 
 
 async def _migrate_records_to_target_layer(
@@ -680,7 +711,7 @@ async def search_memory(
     merged_results: List[Dict[str, Any]] = []
     seen_ids: Set[str] = set()
     for layer in layer_order:
-        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
+        layer_ids = _resolve_read_layer_ids(scope, layer, plugin_config)
         if not layer_ids:
             continue
         raw_results, legacy_hit = await _read_with_legacy_fallback(
@@ -785,7 +816,7 @@ async def get_all_memory(
     merged_results: List[Dict[str, Any]] = []
     seen_ids: Set[str] = set()
     for layer in layer_order:
-        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
+        layer_ids = _resolve_read_layer_ids(scope, layer, plugin_config)
         if not layer_ids:
             continue
         raw, legacy_hit = await _read_with_legacy_fallback(
@@ -1249,7 +1280,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
         search_tasks = []
 
         for layer in layer_order:
-            layer_ids = _resolve_layer_ids(scope, layer, config)
+            layer_ids = _resolve_read_layer_ids(scope, layer, config)
             if not layer_ids:
                 continue
 
