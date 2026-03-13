@@ -1392,10 +1392,21 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
         )
 
         result_text = formatted.get("text", "")
+        injected_results = formatted.get("results") or []
         if not result_text or result_text == "(无结果)":
-            return None
+            fallback_formatted = format_search_output(top_results, threshold=None)
+            fallback_text = fallback_formatted.get("text", "")
+            if fallback_text and fallback_text != "(无结果)":
+                result_text = fallback_text
+                injected_results = fallback_formatted.get("results") or []
+                logger.info(
+                    "[PreSearch] 阈值过滤后为空，回退为低阈值结果注入"
+                )
+            else:
+                logger.debug("[PreSearch] 阈值过滤后无可注入结果，跳过预搜索")
+                return None
 
-        logger.info(f"[PreSearch] 成功检索到 {len(top_results)} 条记忆")
+        logger.info(f"[PreSearch] 成功检索到 {len(injected_results)} 条记忆")
         return result_text
 
     except asyncio.TimeoutError:

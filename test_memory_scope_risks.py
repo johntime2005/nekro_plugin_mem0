@@ -55,6 +55,15 @@ def _load_plugin_method_module():
     class _DummyPluginConfig:
         ENABLE_AGENT_SCOPE = True
         PERSONA_BIND_USER = True
+        PRE_SEARCH_DB_MESSAGE_COUNT = 50
+        PRE_SEARCH_QUERY_MESSAGE_COUNT = 10
+        PRE_SEARCH_QUERY_MAX_LENGTH = 500
+        PRE_SEARCH_SKIP_CONVERSATION = True
+        PRE_SEARCH_RESULT_LIMIT = 5
+        PRE_SEARCH_TIMEOUT = 0.8
+        MEMORY_SEARCH_SCORE_THRESHOLD = 0.7
+        SESSION_ISOLATION = True
+        PRE_SEARCH_ENABLED = True
 
     class _DummyPlugin:
         def mount_init_method(self):
@@ -244,6 +253,45 @@ def test_read_layer_fallback_keeps_legacy_persona_readability() -> None:
         "agent_id": "a1",
         "run_id": None,
     }
+
+
+def test_pre_search_falls_back_when_threshold_filters_all() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    class _Ctx:
+        chat_key = "chat_1"
+
+    async def _fake_fetch_recent_messages(_ctx, _count):
+        return [{"role": "user", "content": "今天可真是冷啊"}]
+
+    async def _fake_search_single_layer(_client, _query, layer_ids, _limit, _config):
+        return (
+            layer_ids["layer"],
+            [
+                {
+                    "id": "mem_1",
+                    "memory": "用户怕冷，天气冷时希望被提醒添衣",
+                    "score": 0.1,
+                }
+            ],
+        )
+
+    async def _fake_get_mem0_client():
+        return object()
+
+    setattr(plugin_method, "_fetch_recent_messages", _fake_fetch_recent_messages)
+    setattr(
+        plugin_method,
+        "build_pre_search_query",
+        lambda *args, **kwargs: "今天可真是冷啊",
+    )
+    setattr(plugin_method, "_search_single_layer", _fake_search_single_layer)
+    setattr(plugin_method, "get_mem0_client", _fake_get_mem0_client)
+
+    result = __import__("asyncio").run(plugin_method._execute_pre_search(_Ctx()))
+
+    assert result is not None
+    assert "用户怕冷" in result
 
 
 if __name__ == "__main__":
