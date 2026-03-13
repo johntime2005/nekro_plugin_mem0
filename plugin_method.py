@@ -1257,6 +1257,10 @@ def _select_pre_search_injection_text(
     return None, [], False
 
 
+def _pre_search_skip(reason_code: str, message: str) -> None:
+    logger.info(f"[PreSearch] 未注入原因({reason_code}): {message}")
+
+
 async def _fetch_recent_messages(
     _ctx: AgentCtx, message_count: int
 ) -> List[Dict[str, Any]]:
@@ -1318,6 +1322,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 
         if not messages:
             logger.debug("[PreSearch] 无历史消息，跳过预搜索")
+            _pre_search_skip("NO_MESSAGES", "未获取到历史消息")
             return None
 
         # 2. 生成查询
@@ -1329,6 +1334,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 
         if not query:
             logger.debug("[PreSearch] 无法生成查询，跳过预搜索")
+            _pre_search_skip("NO_QUERY", "无法从历史消息生成查询")
             return None
 
         logger.info(f"[PreSearch] 生成查询: {query[:100]}...")
@@ -1337,6 +1343,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
         scope = resolve_memory_scope(_ctx)
         if not scope.has_scope():
             logger.debug("[PreSearch] 无有效作用域，跳过预搜索")
+            _pre_search_skip("NO_SCOPE", "user_id/agent_id/run_id 全为空")
             return None
 
         # 4. 确定搜索层级
@@ -1359,6 +1366,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 
         if not layer_order:
             logger.debug("[PreSearch] 无可搜索层级，跳过预搜索")
+            _pre_search_skip("NO_LAYER_ORDER", "未解析到可搜索层级")
             return None
 
         logger.debug(f"[PreSearch] 搜索层级: {layer_order}")
@@ -1367,6 +1375,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
         client = await get_mem0_client()
         if client is None:
             logger.warning("[PreSearch] mem0 客户端初始化失败")
+            _pre_search_skip("NO_CLIENT", "mem0 客户端初始化失败")
             return None
 
         # 6. 并行搜索所有层级
@@ -1391,6 +1400,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 
         if not search_tasks:
             logger.debug("[PreSearch] 无有效层级，跳过预搜索")
+            _pre_search_skip("NO_SEARCH_TASKS", "层级存在但均无法构建检索任务")
             return None
 
         # 并行执行（带总超时）：超时后保留已完成结果，取消未完成任务
@@ -1419,6 +1429,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
             logger.warning(
                 f"[PreSearch] 所有层级均超时（>{config.PRE_SEARCH_TIMEOUT}s），降级"
             )
+            _pre_search_skip("ALL_TIMEOUT", "所有层级超时")
             return None
 
         # 7. 合并结果并去重
@@ -1444,6 +1455,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 
         if not merged_results:
             logger.debug("[PreSearch] 无搜索结果")
+            _pre_search_skip("NO_RESULTS", "首轮与兜底均无搜索结果")
             return None
 
         # 8. 按分数排序并限制数量
@@ -1462,6 +1474,7 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
             logger.info("[PreSearch] 阈值过滤后为空，回退为低阈值结果注入")
         if not result_text:
             logger.debug("[PreSearch] 阈值过滤后无可注入结果，跳过预搜索")
+            _pre_search_skip("NO_INJECTABLE_TEXT", "结果存在但不可格式化为可注入文本")
             return None
 
         logger.info(f"[PreSearch] 成功检索到 {len(injected_results)} 条记忆")
@@ -1469,9 +1482,11 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 
     except asyncio.TimeoutError:
         logger.warning(f"[PreSearch] 超时（>{config.PRE_SEARCH_TIMEOUT}s），降级")
+        _pre_search_skip("TIMEOUT_EXCEPTION", "预搜索整体超时异常")
         return None
     except Exception as exc:
         logger.warning(f"[PreSearch] 执行失败: {exc}", exc_info=True)
+        _pre_search_skip("EXECUTION_EXCEPTION", f"执行异常: {exc}")
         return None
 
 
@@ -1494,9 +1509,13 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
                     + "\n"
                 )
                 logger.info("[PreSearch] 预搜索结果已注入提示")
+            else:
+                logger.info("[PreSearch] 本次未注入：未检索到可注入结果")
         except Exception as exc:
             # 优雅降级：任何异常都不影响基础提示
             logger.warning(f"[PreSearch] 预搜索失败，降级到基础提示: {exc}")
+    else:
+        logger.info("[PreSearch] 已禁用：PRE_SEARCH_ENABLED=False")
 
     scope = resolve_memory_scope(_ctx)
     layer_order = scope.default_layer_order(

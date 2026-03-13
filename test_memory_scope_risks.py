@@ -369,6 +369,39 @@ def test_pre_search_second_pass_conversation_fallback_when_first_pass_empty() ->
     assert "conversation" in call_layers
 
 
+def test_inject_memory_prompt_returns_base_when_pre_search_empty() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    class _Ctx:
+        chat_key = "chat_3"
+
+    async def _fake_execute_pre_search(_ctx):
+        return None
+
+    setattr(plugin_method, "_execute_pre_search", _fake_execute_pre_search)
+
+    output = __import__("asyncio").run(plugin_method.inject_memory_prompt(_Ctx()))
+
+    assert "📚 【预加载记忆】" not in output
+    assert "你可以使用记忆插件" in output
+
+
+def test_pre_search_skip_reason_no_messages() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    class _Ctx:
+        chat_key = "chat_4"
+
+    async def _fake_fetch_recent_messages(_ctx, _count):
+        return []
+
+    setattr(plugin_method, "_fetch_recent_messages", _fake_fetch_recent_messages)
+
+    result = __import__("asyncio").run(plugin_method._execute_pre_search(_Ctx()))
+
+    assert result is None
+
+
 if __name__ == "__main__":
     test_agent_scope_switch_disables_persona_layer()
     test_add_default_prefers_long_term_layer()
@@ -377,4 +410,6 @@ if __name__ == "__main__":
     test_read_layer_fallback_keeps_legacy_persona_readability()
     test_pre_search_falls_back_when_threshold_filters_all()
     test_pre_search_second_pass_conversation_fallback_when_first_pass_empty()
+    test_inject_memory_prompt_returns_base_when_pre_search_empty()
+    test_pre_search_skip_reason_no_messages()
     print("✅ test_memory_scope_risks passed")
