@@ -1200,6 +1200,63 @@ async def _search_single_layer(
         return (layer, None)
 
 
+async def _ensure_pre_search_results(
+    merged_results: List[Dict[str, Any]],
+    seen_ids: Set[str],
+    layer_order: List[str],
+    scope: MemoryScope,
+    config: Any,
+    client: Any,
+    query: str,
+) -> List[Dict[str, Any]]:
+    if merged_results:
+        return merged_results
+
+    conversation_in_order = any(layer == "conversation" for layer in layer_order)
+    if not config.PRE_SEARCH_SKIP_CONVERSATION or conversation_in_order:
+        return merged_results
+
+    conversation_layer_ids = _resolve_read_layer_ids(scope, "conversation", config)
+    if not conversation_layer_ids:
+        return merged_results
+
+    conversation_layer, conversation_raw_results = await _search_single_layer(
+        client,
+        query,
+        conversation_layer_ids,
+        config.PRE_SEARCH_RESULT_LIMIT,
+        config,
+    )
+    if conversation_raw_results is None:
+        return merged_results
+
+    conversation_annotated = _annotate_results(
+        conversation_raw_results, conversation_layer, seen_ids
+    )
+    merged_results.extend(conversation_annotated)
+    if conversation_annotated:
+        logger.info("[PreSearch] 首轮无结果，conversation 层兜底命中")
+    return merged_results
+
+
+def _select_pre_search_injection_text(
+    top_results: List[Dict[str, Any]], threshold: Optional[float]
+) -> Tuple[Optional[str], List[Dict[str, Any]], bool]:
+    formatted = format_search_output(top_results, threshold=threshold)
+    result_text = formatted.get("text", "")
+    injected_results = formatted.get("results") or []
+    if result_text and result_text != "(无结果)":
+        return result_text, injected_results, False
+
+    fallback_formatted = format_search_output(top_results, threshold=None)
+    fallback_text = fallback_formatted.get("text", "")
+    fallback_results = fallback_formatted.get("results") or []
+    if fallback_text and fallback_text != "(无结果)":
+        return fallback_text, fallback_results, True
+
+    return None, [], False
+
+
 async def _fetch_recent_messages(
     _ctx: AgentCtx, message_count: int
 ) -> List[Dict[str, Any]]:
@@ -1375,6 +1432,16 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
             annotated = _annotate_results(raw_results, layer_name, seen_ids)
             merged_results.extend(annotated)
 
+        merged_results = await _ensure_pre_search_results(
+            merged_results,
+            seen_ids,
+            layer_order,
+            scope,
+            config,
+            client,
+            query,
+        )
+
         if not merged_results:
             logger.debug("[PreSearch] 无搜索结果")
             return None
@@ -1386,25 +1453,16 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
             : config.PRE_SEARCH_RESULT_LIMIT * completed_layer_count
         ]
 
-        # 9. 格式化结果
-        formatted = format_search_output(
-            top_results, threshold=config.MEMORY_SEARCH_SCORE_THRESHOLD
+        result_text, injected_results, threshold_fallback_hit = (
+            _select_pre_search_injection_text(
+                top_results, threshold=config.MEMORY_SEARCH_SCORE_THRESHOLD
+            )
         )
-
-        result_text = formatted.get("text", "")
-        injected_results = formatted.get("results") or []
-        if not result_text or result_text == "(无结果)":
-            fallback_formatted = format_search_output(top_results, threshold=None)
-            fallback_text = fallback_formatted.get("text", "")
-            if fallback_text and fallback_text != "(无结果)":
-                result_text = fallback_text
-                injected_results = fallback_formatted.get("results") or []
-                logger.info(
-                    "[PreSearch] 阈值过滤后为空，回退为低阈值结果注入"
-                )
-            else:
-                logger.debug("[PreSearch] 阈值过滤后无可注入结果，跳过预搜索")
-                return None
+        if threshold_fallback_hit:
+            logger.info("[PreSearch] 阈值过滤后为空，回退为低阈值结果注入")
+        if not result_text:
+            logger.debug("[PreSearch] 阈值过滤后无可注入结果，跳过预搜索")
+            return None
 
         logger.info(f"[PreSearch] 成功检索到 {len(injected_results)} 条记忆")
         return result_text

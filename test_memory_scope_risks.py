@@ -107,13 +107,43 @@ def _load_plugin_method_module():
     sys.modules[f"{package_name}.mem0_utils"] = mem0_utils_stub
 
     output_stub = types.ModuleType(f"{package_name}.mem0_output_formatter")
+
+    def _normalize_results(value):
+        if isinstance(value, dict):
+            return value.get("results", [])
+        return value or []
+
+    def _format_memory_list(items):
+        if not items:
+            return "(无结果)"
+        lines = []
+        for item in items:
+            text = item.get("memory") or item.get("data") or item.get("content") or ""
+            if text:
+                lines.append(f"- {text}")
+        return "\n".join(lines) if lines else "(无结果)"
+
+    def _format_search_output(results, tags=None, threshold=None):
+        filtered = _normalize_results(results)
+        if threshold is not None:
+            filtered = [
+                item
+                for item in filtered
+                if item.get("score") is None or item.get("score") >= threshold
+            ]
+        return {"results": filtered, "text": _format_memory_list(filtered)}
+
     setattr(output_stub, "format_add_output", lambda *args, **kwargs: "")
-    setattr(output_stub, "format_get_all_output", lambda *args, **kwargs: {"text": ""})
+    setattr(
+        output_stub,
+        "format_get_all_output",
+        lambda results, *args, **kwargs: {"results": _normalize_results(results), "text": _format_memory_list(_normalize_results(results))},
+    )
     setattr(output_stub, "format_history_output", lambda *args, **kwargs: [])
     setattr(output_stub, "format_history_text", lambda *args, **kwargs: "")
-    setattr(output_stub, "format_search_output", lambda *args, **kwargs: {"text": ""})
-    setattr(output_stub, "normalize_results", lambda value: value or [])
-    setattr(output_stub, "_format_memory_list", lambda *args, **kwargs: "")
+    setattr(output_stub, "format_search_output", _format_search_output)
+    setattr(output_stub, "normalize_results", _normalize_results)
+    setattr(output_stub, "_format_memory_list", _format_memory_list)
     sys.modules[f"{package_name}.mem0_output_formatter"] = output_stub
 
     pre_search_stub = types.ModuleType(f"{package_name}.pre_search_utils")
@@ -294,10 +324,57 @@ def test_pre_search_falls_back_when_threshold_filters_all() -> None:
     assert "用户怕冷" in result
 
 
+def test_pre_search_second_pass_conversation_fallback_when_first_pass_empty() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    class _Ctx:
+        chat_key = "chat_2"
+
+    async def _fake_fetch_recent_messages(_ctx, _count):
+        return [{"role": "user", "content": "今天可真是冷啊"}]
+
+    async def _fake_get_mem0_client():
+        return object()
+
+    call_layers = []
+
+    async def _fake_search_single_layer(_client, _query, layer_ids, _limit, _config):
+        call_layers.append(layer_ids["layer"])
+        if layer_ids["layer"] == "conversation":
+            return (
+                "conversation",
+                [
+                    {
+                        "id": "mem_conv_1",
+                        "memory": "当前会话提到天气寒冷",
+                        "score": 0.9,
+                    }
+                ],
+            )
+        return (layer_ids["layer"], [])
+
+    setattr(plugin_method, "_fetch_recent_messages", _fake_fetch_recent_messages)
+    setattr(
+        plugin_method,
+        "build_pre_search_query",
+        lambda *args, **kwargs: "今天可真是冷啊",
+    )
+    setattr(plugin_method, "_search_single_layer", _fake_search_single_layer)
+    setattr(plugin_method, "get_mem0_client", _fake_get_mem0_client)
+
+    result = __import__("asyncio").run(plugin_method._execute_pre_search(_Ctx()))
+
+    assert result is not None
+    assert "当前会话提到天气寒冷" in result
+    assert "conversation" in call_layers
+
+
 if __name__ == "__main__":
     test_agent_scope_switch_disables_persona_layer()
     test_add_default_prefers_long_term_layer()
     test_persona_bind_user_requires_user_and_includes_user_id()
     test_layer_query_kwargs_filters_none_values()
     test_read_layer_fallback_keeps_legacy_persona_readability()
+    test_pre_search_falls_back_when_threshold_filters_all()
+    test_pre_search_second_pass_conversation_fallback_when_first_pass_empty()
     print("✅ test_memory_scope_risks passed")
