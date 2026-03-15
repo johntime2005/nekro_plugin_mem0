@@ -617,17 +617,20 @@ async def add_memory(
         }
 
     # 后台执行实际写入，立即返回不阻塞沙盒
-    _fire_and_forget(
-        asyncio.to_thread(
-            client.add,
-            memory,
-            user_id=layer_ids["user_id"],
-            agent_id=layer_ids["agent_id"],
-            run_id=layer_ids["run_id"],
-            metadata=metadata or {},
-            infer=False,
-        )
-    )
+    add_kwargs: Dict[str, Any] = {
+        "metadata": metadata or {},
+        "infer": False,
+    }
+    _uid = layer_ids["user_id"] if (plugin_config.ENABLE_AGENT_SCOPE or target_layer == "global") else None
+    _aid = layer_ids["agent_id"] if (plugin_config.ENABLE_AGENT_SCOPE or target_layer == "persona") else None
+    _rid = layer_ids["run_id"]
+    if _uid is not None:
+        add_kwargs["user_id"] = _uid
+    if _aid is not None:
+        add_kwargs["agent_id"] = _aid
+    if _rid is not None:
+        add_kwargs["run_id"] = _rid
+    _fire_and_forget(asyncio.to_thread(client.add, memory, **add_kwargs))
     return {"ok": True, "layer": layer_ids["layer"], "message": "记忆已提交写入"}
 
 
@@ -1868,15 +1871,20 @@ async def _command_add(
         )
 
     try:
-        result = await asyncio.to_thread(
-            client.add,
-            memory_text,
-            user_id=layer_ids["user_id"],
-            agent_id=layer_ids["agent_id"],
-            run_id=layer_ids["run_id"],
-            metadata=metadata or {},
-            infer=False,
-        )
+        add_kwargs: Dict[str, Any] = {
+            "metadata": metadata or {},
+            "infer": False,
+        }
+        _uid = layer_ids["user_id"] if (plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "global") else None
+        _aid = layer_ids["agent_id"] if (plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona") else None
+        _rid = layer_ids["run_id"]
+        if _uid is not None:
+            add_kwargs["user_id"] = _uid
+        if _aid is not None:
+            add_kwargs["agent_id"] = _aid
+        if _rid is not None:
+            add_kwargs["run_id"] = _rid
+        result = await asyncio.to_thread(client.add, memory_text, **add_kwargs)
     except Exception as exc:  # pragma: no cover
         logger.error(f"添加记忆失败: {exc}")
         return _format_command_error(str(exc))
