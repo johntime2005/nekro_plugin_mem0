@@ -376,15 +376,14 @@ async def _migrate_records_to_target_layer(
         if memory_id:
             metadata.setdefault("_source_memory_id", memory_id)
 
-        await asyncio.to_thread(
-            client.add,
-            memory_text,
-            user_id=target_layer_ids["user_id"],
-            agent_id=target_layer_ids["agent_id"],
-            run_id=target_layer_ids["run_id"],
-            metadata=metadata,
-            infer=False,
-        )
+        _add_kw: Dict[str, Any] = {"metadata": metadata, "infer": False}
+        if target_layer_ids.get("user_id") is not None:
+            _add_kw["user_id"] = target_layer_ids["user_id"]
+        if target_layer_ids.get("agent_id") is not None:
+            _add_kw["agent_id"] = target_layer_ids["agent_id"]
+        if target_layer_ids.get("run_id") is not None:
+            _add_kw["run_id"] = target_layer_ids["run_id"]
+        await asyncio.to_thread(client.add, memory_text, **_add_kw)
         migrated += 1
 
     if migrated:
@@ -1018,12 +1017,14 @@ async def delete_all_memory(
         target_layers.append(layer_ids["layer"])
 
         async def _do_delete_all(_layer_ids=layer_ids):
-            await asyncio.to_thread(
-                client.delete_all,
-                user_id=_layer_ids["user_id"],
-                agent_id=_layer_ids["agent_id"],
-                run_id=_layer_ids["run_id"],
-            )
+            _del_kw: Dict[str, Any] = {}
+            if _layer_ids.get("user_id") is not None:
+                _del_kw["user_id"] = _layer_ids["user_id"]
+            if _layer_ids.get("agent_id") is not None:
+                _del_kw["agent_id"] = _layer_ids["agent_id"]
+            if _layer_ids.get("run_id") is not None:
+                _del_kw["run_id"] = _layer_ids["run_id"]
+            await asyncio.to_thread(client.delete_all, **_del_kw)
 
         _fire_and_forget(_do_delete_all())
 
@@ -1743,12 +1744,14 @@ async def _command_clear_memory(scope: MemoryScope, layers: Optional[List[str]])
             layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
             if not layer_ids:
                 continue
-            await asyncio.to_thread(
-                client.delete_all,
-                user_id=layer_ids["user_id"],
-                agent_id=layer_ids["agent_id"],
-                run_id=layer_ids["run_id"],
-            )
+            _del_kw: Dict[str, Any] = {}
+            if layer_ids.get("user_id") is not None:
+                _del_kw["user_id"] = layer_ids["user_id"]
+            if layer_ids.get("agent_id") is not None:
+                _del_kw["agent_id"] = layer_ids["agent_id"]
+            if layer_ids.get("run_id") is not None:
+                _del_kw["run_id"] = layer_ids["run_id"]
+            await asyncio.to_thread(client.delete_all, **_del_kw)
             deleted_layers.append(layer_ids["layer"])
     except Exception as exc:  # pragma: no cover
         logger.error(f"清空记忆失败: {exc}")
