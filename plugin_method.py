@@ -531,9 +531,9 @@ async def init_plugin() -> None:
     SandboxMethodType.BEHAVIOR,
     name="添加记忆",
     description=(
-        "为用户的个人资料添加一条新记忆，添加的记忆与该用户相关。"
-        "此操作为非阻塞操作，调用后立即返回，实际写入在后台完成，可以和发送消息写在同一个代码块中。"
-        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None 并显式提供 user_id/agent_id/run_id（否则直接写 _ctx 会 NameError）。"
+        "为用户的个人资料添加一条新记忆。"
+        "非阻塞，立即返回，可与 send_text 写在同一代码块。"
+        "调用示例：await add_memory('用户喜欢猫', scope_level='global')"
     ),
 )
 async def add_memory(
@@ -639,7 +639,7 @@ async def add_memory(
     description=(
         "根据查询语句搜索用户记忆。"
         "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
-        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（不要写 search_memory(_ctx, ...) 以免 NameError）。"
+        "调用示例：await search_memory('查询词') 或 await search_memory('查询词', layers=['global'])"
         "【注意】如果返回内容过长导致截断（如遇到 view_str_content 截断提示），请缩小 limit 行范围或自行提取概要内容避免全文打印。"
     ),
 )
@@ -755,7 +755,7 @@ async def search_memory(
     description=(
         "获取指定作用域（user/agent/run）的全部记忆，可按标签过滤。"
         "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
-        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None 并显式提供 user_id/agent_id/run_id（否则直接写 _ctx 会 NameError）。"
+        "调用示例：await get_all_memory() 或 await get_all_memory(layers=['global'])"
         "【注意】当记忆条目过多时可能被截断（如遇到 view_str_content 截断提示），建议按 tags 过滤，或自行提取概要字段避免直接全量打印字典。"
     ),
 )
@@ -852,7 +852,7 @@ async def get_all_memory(
     description=(
         "根据记忆ID更新记忆内容。"
         "此操作为非阻塞操作，调用后立即返回，实际更新在后台完成，可以和发送消息写在同一个代码块中。"
-        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（否则直接写 _ctx 会 NameError）。"
+        "调用示例：await update_memory(memory_id, '新内容')"
     ),
 )
 async def update_memory(
@@ -895,7 +895,7 @@ async def update_memory(
         "根据记忆ID删除单条记忆。当发现记忆内容已过时、不准确或与当前事实矛盾时，应主动调用此方法清理。"
         "例如：用户更正了之前的信息、用户偏好发生变化、记忆内容与新获取的信息冲突等情况。"
         "此操作为非阻塞操作，调用后立即返回，实际删除在后台完成，可以和发送消息写在同一个代码块中。"
-        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（否则直接写 _ctx 会 NameError）。"
+        "调用示例：await delete_memory(memory_id)"
     ),
 )
 async def delete_memory(
@@ -943,7 +943,7 @@ async def delete_memory(
     description=(
         "删除指定 user/agent/run 对应的全部记忆（危险操作，请谨慎使用）。"
         "此操作为非阻塞操作，调用后立即返回，实际删除在后台完成，可以和发送消息写在同一个代码块中。"
-        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None 并显式提供 user_id/agent_id/run_id（否则直接写 _ctx 会 NameError）。"
+        "调用示例：await delete_all_memory(layers=['global'])"
     ),
 )
 async def delete_all_memory(
@@ -1039,7 +1039,7 @@ async def delete_all_memory(
     description=(
         "查看指定记忆的历史版本。"
         "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
-        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（否则直接写 _ctx 会 NameError）。"
+        "调用示例：await get_memory_history(memory_id)"
         "【注意】如果历史内容过长导致截断（如遇到 view_str_content 截断提示），请自行提取结果概要避免全文打印字典。"
     ),
 )
@@ -1087,7 +1087,7 @@ async def get_memory_history(
     name="记忆指令面板",
     description=(
         "提供命令式入口，便于在后台/网页操作：支持 add/search/list/update/delete/delete_all/history。"
-        "调用约定：沙盒内首参传 _ctx；独立脚本首参传 None（否则直接写 _ctx 会 NameError）。"
+        "调用示例：await memory_command('search', {'query': '查询词'})"
     ),
 )
 async def memory_command(
@@ -1528,80 +1528,34 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
     )
     available_layers = ", ".join(layer_order) if layer_order else "无可用层级"
     lines = [
-        "你可以使用记忆插件在多个会话间维持用户/Agent的长期记忆。",
+        "# 长期记忆插件",
+        f"可用层级: {available_layers} | 阈值: {config.MEMORY_SEARCH_SCORE_THRESHOLD}",
         "",
-        "📌 【操作类型与调用规范】：",
-        "记忆操作分为两类，请区分对待：",
+        "## 调用规则（重要）",
+        "直接调用方法名，不需要传 _ctx 参数，框架自动注入。",
         "",
-        "  🟢 写操作（非阻塞，立即返回）：add_memory / update_memory / delete_memory / delete_all_memory",
-        "     这些操作会立即返回，实际写入在后台完成。可以和 send_text 等消息发送写在同一个代码块中。",
+        "## 写操作（非阻塞，可与 send_text 同一代码块）",
+        "await add_memory(‘用户喜欢猫’, scope_level=’global’)",
+        "await add_memory(‘用户今天心情好’, scope_level=’persona’)",
+        "await send_text(_ctx, ‘好的，我记住了！’)  # send_text 仍需 _ctx",
         "",
-        "  🟡 读操作（需要等待结果）：search_memory / get_all_memory / get_memory_history",
-        "     这些操作需要等待向量数据库返回结果，可能耗时较长。",
-        "     建议将读操作与发送消息分开到不同代码块中，避免因耗时过长导致执行超时。",
-        "     正确做法：代码块1执行搜索 → 代码块2根据结果发送消息。",
+        "## 读操作（必须单独代码块，等待结果后再 send_text）",
+        "result = await search_memory(‘用户喜欢什么’)  # 语义搜索",
+        "result = await search_memory(‘猫’, layers=[‘global’])  # 指定层",
+        "result = await get_all_memory()  # 列出全部（不要用 search_memory 代替）",
+        "result = await get_all_memory(layers=[‘global’])  # 指定层全部",
         "",
-        "✅ 可以这样写（写操作 + 发消息在一起）：",
-        "  ```",
-        "  await add_memory(_ctx, '用户喜欢猫')",
-        "  await send_text(_ctx, '好的，我记住了！')",
-        "  ```",
+        "## 维护",
+        "await update_memory(memory_id, ‘新内容’)  # 更新",
+        "await delete_memory(memory_id)  # 删除过时记忆（主动维护！）",
         "",
-        "✅ 读操作建议分开代码块：",
-        "  ```",
-        "  # 代码块1：搜索记忆",
-        "  result = await search_memory(_ctx, '用户的爱好')",
-        "  ```",
-        "  ```",
-        "  # 代码块2：根据结果回复",
-        "  await send_text(_ctx, f'根据我的记忆，你的爱好是...')",
-        "  ```",
+        "## 层级说明",
+        "conversation: 仅当前对话有效",
+        "persona: 绑定当前人设，跨会话共享",
+        "global: 属于用户本人，跨人设跨会话",
         "",
-        "🔎 【search_memory 与 get_all_memory 的边界】（必须遵守）：",
-        "  • search_memory：语义检索（需要具体查询意图），例如‘我喜欢什么’、‘之前提过旅行吗’。",
-        "  • get_all_memory：列举记忆（获取全量/清单），例如‘列出所有记忆/全部记忆’。",
-        "  • 不要用 search_memory(query='所有记忆') 来做全量列举；这会因语义相似度机制出现空结果。",
-        "",
-        "🧹 【记忆清理最佳实践】：",
-        "你应该主动维护记忆库的准确性，及时清理过时或矛盾的记忆：",
-        "  • 当用户更正信息时（如'我其实不喜欢XX'），先搜索并删除旧的错误记忆，再添加正确的",
-        "  • 当用户状态变化时（如换工作、搬家），删除旧状态记忆，添加新状态",
-        "  • 当发现记忆之间存在矛盾时，保留最新的，删除过时的",
-        "  • 临时性信息过期后应清理（如已结束的事件、已完成的计划）",
-        "  • 建议流程：搜索相关旧记忆 → 删除过时的 → 添加新记忆",
-        "",
-        "⚠️ 重要：三层记忆模型的隔离标识符（请务必理解）：",
-        "  • conversation 层：使用 run_id，记忆仅在当前会话内有效",
-        "  • persona 层：使用 agent_id（人设ID），记忆与特定人设绑定，在该人设的所有会话间共享",
-        "  • global 层：使用 user_id，记忆跨人设和会话，属于用户本人",
-        "",
-        "❌ 常见错误：",
-        "  • 不要用 user_id 操作 persona 层（会失败或返回空）",
-        "  • 不要用 agent_id 操作 global 层（会失败或返回空）",
-        "  • persona 层跨会话共享需要在不同会话中使用相同的 agent_id",
-        "",
-        "📖 调用方法（_ctx 由系统自动提供，直接使用即可）：",
-        "",
-        "写入记忆：add_memory(_ctx, memory, scope_level?, user_id?, agent_id?, run_id?, metadata?)",
-        "  • 写入 persona 层：await add_memory(_ctx, '内容', scope_level='persona')",
-        "  • 写入 global 层：await add_memory(_ctx, '内容', scope_level='global')",
-        "  • 写入 conversation 层：await add_memory(_ctx, '内容', scope_level='conversation')",
-        "",
-        "检索记忆：search_memory(_ctx, query, layers?, limit?)",
-        "  • 搜索 persona 层：await search_memory(_ctx, '查询词', layers=['persona'])",
-        "  • 搜索 global 层：await search_memory(_ctx, '查询词', layers=['global'])",
-        "  • 跨层搜索：await search_memory(_ctx, '查询词', layers=['persona', 'global'])",
-        "",
-        "获取全部记忆：get_all_memory(_ctx, layers?, tags?)",
-        "  • 获取 persona 层：await get_all_memory(_ctx, layers=['persona'])",
-        "  • 获取 global 层：await get_all_memory(_ctx, layers=['global'])",
-        "  • 获取全量：await get_all_memory(_ctx, layers=['persona', 'global'])",
-        "",
-        "更新记忆：await update_memory(_ctx, memory_id, new_memory)",
-        "删除记忆：await delete_memory(_ctx, memory_id)",
-        "批量删除：await delete_all_memory(_ctx, layers?, user_id?, agent_id?, run_id?)",
-        f"当前相似度阈值: {config.MEMORY_SEARCH_SCORE_THRESHOLD}。",
-        f"可用层级顺序: {available_layers}。",
+        "## 记忆维护原则",
+        "用户更正信息时：先 search_memory 找旧记忆 → delete_memory → add_memory 写新的",
     ]
 
     if config.ENABLE_AGENT_SCOPE:
