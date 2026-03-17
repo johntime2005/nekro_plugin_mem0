@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nekro_plugin_mem0"
-version = "1.4.0"
+version = "2.0.0"
 description = "Nekro Agent 长期记忆插件，基于 mem0 实现"
 authors = ["johntime2005 <johntime2005@github.com>"]
 readme = "README.md"

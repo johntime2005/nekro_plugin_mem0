@@ -13,6 +13,14 @@
   - **解决了维度不匹配问题**：允许显式设置 `Embedding` 维度，完美支持 `text-embedding-004` (768维) 等模型。
 - **🧩 多层记忆互通**：基于 mem0 v1.0 的多层记忆架构，支持在同一个用户、Agent 与会话（run）之间同步写入，让助理能在多会话间共享记忆，同时仍可按需启用会话级隔离。
 - **💾 多种后端**: 支持 `Qdrant`, `Chroma`, `Redis` 等多种向量数据库作为记忆存储后端，Redis 方案便于 Docker 部署时通过数据卷持久化和迁移。
+- **🔄 智能去重**: SimHash + 多指标相似度评分，自动过滤重复记忆
+- **🤖 被动提取**: 每 N 轮对话自动从历史消息中提取结构化记忆
+- **✍️ 查询改写**: LLM 改写查询提升检索质量，自动跳过无意义检索
+- **🏷️ 增强类型**: 11 种记忆类型 + 重要性评分(1-10) + 过期时间
+- **🧠 多引擎支持**: 
+  - **Basic**: 向量搜索（默认，向后兼容）
+  - **HippoRAG**: 知识图谱 + PPR 多跳推理
+  - **EMGAS**: 激活扩散 + 时间衰减
 
 ## 🚀 快速开始
 
@@ -85,6 +93,37 @@ class MemoryConfig(ConfigBase):
 - `REDIS_URL`：当 `VECTOR_DB=redis` 时生效，形如 `redis://redis:6379/0`；生产环境请将 Redis 数据目录挂载卷以获得持久化，并可通过更换 URL 在服务器间迁移。
 - `LEGACY_SCOPE_FALLBACK_ENABLED`：为 `True`（默认）时，读取会自动回退尝试旧作用域格式（旧 user/agent/run 编码），升级后历史记忆可见性更好。
 - `AUTO_MIGRATE_ON_READ`：为 `True` 时，若回退命中旧作用域且新作用域当前为空，会把旧记忆复制到新作用域（默认关闭，建议灰度开启）。
+
+### 去重配置
+- `DEDUP_ENABLED` (bool, 默认 True): 启用去重
+- `DEDUP_SIMILARITY_THRESHOLD` (float, 默认 0.8): 相似度阈值（0.0-1.0）
+- `DEDUP_SIMHASH_THRESHOLD` (int, 默认 10): SimHash Hamming 距离预筛阈值
+
+### 被动提取配置
+- `AUTO_EXTRACT_ENABLED` (bool, 默认 True): 启用被动提取
+- `AUTO_EXTRACT_INTERVAL` (int, 默认 3): 提取间隔（轮次）
+- `AUTO_EXTRACT_TARGET_LAYER` (str, 默认 "persona"): 提取目标层级
+
+### 查询改写配置
+- `QUERY_REWRITE_ENABLED` (bool, 默认 False): 启用查询改写（会增加延迟）
+
+### 引擎配置
+- `MEMORY_ENGINE` (str, 默认 "basic"): 记忆引擎选择
+  - `"basic"`: 向量搜索（默认，向后兼容）
+  - `"hippo"`: HippoRAG 知识图谱引擎
+  - `"emgas"`: EMGAS 激活扩散引擎
+
+#### HippoRAG 引擎参数
+- `HIPPO_PPR_ALPHA` (float, 默认 0.15): PPR 重启概率
+- `HIPPO_HYBRID_WEIGHT` (float, 默认 0.8): 语义相似度权重（1-weight 为 PPR 权重）
+- `HIPPO_TOP_ENTITIES` (int, 默认 10): Top 实体数
+- `HIPPO_MAX_CANDIDATES` (int, 默认 200): 最大候选记忆数
+
+#### EMGAS 引擎参数
+- `EMGAS_DECAY_RATE` (float, 默认 0.01): 时间衰减率 λ
+- `EMGAS_PRUNE_THRESHOLD` (float, 默认 0.05): 低激活值剪枝阈值
+- `EMGAS_FIRING_THRESHOLD` (float, 默认 0.1): 激活传播触发阈值
+- `EMGAS_PROPAGATION_DECAY` (float, 默认 0.85): 能量传播保留比例
 
 ## 🛠️ 可用函数 (Agent 可调用)
 
@@ -159,15 +198,84 @@ result = await search_memory(None, "和主人的记忆", agent_id="xinger", user
 
 ## 🏷️ 记忆类型标签
 
-插件支持以下记忆类型标签来分类不同类型的记忆：
+插件支持以下 11 种记忆类型标签：
 
-- **FACTS**: 适用于短期内不会改变的事实信息，如姓名、生日、职业等
-- **PREFERENCES**: 适用于用户的个人喜好，如"喜欢古典音乐"、"讨厌吃香菜"
-- **GOALS**: 适用于用户的目标或愿望，如"想在年底前学会Python"
-- **TRAITS**: 适用于描述用户的人格或习惯，如"是乐观的人"、"有晨跑习惯"
-- **RELATIONSHIPS**: 适用于记录用户的人际关系，如"是张三的同事"
-- **EVENTS**: 适用于记录事件或里程碑，如"上个月参加了婚礼"
-- **TOPICS**: 适用于记录用户讨论过的话题，如"讨论过人工智能"
+- **FACTS**: 事实信息（姓名、生日、职业）
+- **PREFERENCES**: 个人喜好（喜欢古典音乐、讨厌香菜）
+- **GOALS**: 目标或愿望（年底前学会 Python）
+- **TRAITS**: 人格或习惯（乐观、有晨跑习惯）
+- **RELATIONSHIPS**: 人际关系（张三的同事）
+- **EVENTS**: 事件或里程碑（上个月参加婚礼）
+- **TOPICS**: 讨论过的话题（人工智能）
+- **CONTEXTUAL**: 上下文相关信息
+- **TEMPORAL**: 时间相关信息、日期
+- **TASK**: 任务相关、待办事项
+- **SKILL**: 技能、专长、能力
+- **INTEREST**: 兴趣爱好、热情所在
+- **LOCATION**: 位置相关、地点信息
+
+## 🚀 高级特性
+
+### HippoRAG 引擎
+
+基于知识图谱和 Personalized PageRank (PPR) 的多跳推理引擎。
+
+**特性**:
+- 自动提取实体和三元组（subject-predicate-object）
+- 实体别名合并（Jaccard 相似度 ≥ 0.85）
+- PPR 图游走实现多跳推理
+- 混合评分：0.8 × 语义相似度 + 0.2 × PPR 分数
+- 知识图谱持久化到 JSON
+
+**适用场景**: 需要关联推理的复杂知识检索（如"我朋友的朋友喜欢什么"）
+
+**启用方式**:
+```python
+MEMORY_ENGINE = "hippo"
+```
+
+### EMGAS 引擎
+
+基于激活扩散的情景记忆图引擎。
+
+**特性**:
+- 时间衰减：记忆随时间遗忘（activation × e^(-λ × Δt_hours)）
+- 激活扩散：能量在图中传播，模拟人类记忆激活
+- 触发阈值：只有激活值超过阈值的节点才传播能量
+- 低激活剪枝：定期清理不活跃记忆
+- PPMI 边权重：基于共现统计的有意义连接
+
+**适用场景**: 需要时间感知和遗忘机制的长期记忆管理
+
+**启用方式**:
+```python
+MEMORY_ENGINE = "emgas"
+```
+
+### 被动记忆提取
+
+每隔 N 轮对话自动从历史消息中提取关键信息。
+
+**提取优先级**（从高到低）:
+1. preferences（偏好）
+2. personal（个人信息）
+3. interests（兴趣）
+4. habits（习惯）
+5. skills（技能）
+6. relationships（关系）
+7. factual（事实）
+
+**提取的记忆包含**:
+- content: 记忆内容
+- type: 记忆类型（11 种之一）
+- importance: 重要性评分（1-10）
+
+**配置示例**:
+```python
+AUTO_EXTRACT_ENABLED = True
+AUTO_EXTRACT_INTERVAL = 3  # 每 3 轮对话触发一次
+AUTO_EXTRACT_TARGET_LAYER = "persona"  # 写入 persona 层
+```
 
 ## 📄 许可证
 

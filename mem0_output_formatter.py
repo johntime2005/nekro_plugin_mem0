@@ -2,6 +2,7 @@
 输出格式化
 """
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -9,6 +10,26 @@ def format_add_output(result: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(result, dict) and "results" in result:
         return {"ok": True, "results": result.get("results", []), "relations": result.get("relations")}
     return result
+
+
+def _filter_expired(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    valid = []
+    for item in results:
+        metadata = item.get("metadata") or {}
+        expiry = metadata.get("expiration_date")
+        if expiry:
+            try:
+                if isinstance(expiry, str):
+                    exp_dt = datetime.fromisoformat(expiry)
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                    if exp_dt < now:
+                        continue
+            except (ValueError, TypeError):
+                pass
+        valid.append(item)
+    return valid
 
 
 def _normalize_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -51,10 +72,14 @@ def _format_memory_line(item: Dict[str, Any]) -> str:
     metadata = item.get("metadata") or {}
     layer = item.get("layer") or item.get("scope_level")
     tag = metadata.get("TYPE")
+    importance = metadata.get("importance")
+    expiration_date = metadata.get("expiration_date")
     tag_part = f"[{tag}]" if tag else ""
     layer_part = f"[{layer}]" if layer else ""
+    importance_part = f"[importance={importance}]" if importance is not None else ""
+    expires_part = f"[expires={expiration_date}]" if expiration_date else ""
     score_part = f"(score={score:.3f})" if isinstance(score, (int, float)) else ""
-    return f"- {memory_id} {tag_part}{layer_part}{score_part} {text}".strip()
+    return f"- {memory_id} {tag_part}{layer_part}{importance_part}{expires_part}{score_part} {text}".strip()
 
 
 def _format_memory_list(results: List[Dict[str, Any]]) -> str:
@@ -64,17 +89,35 @@ def _format_memory_list(results: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _get_combined_score(item: Dict[str, Any]) -> float:
+    """计算组合分数：0.7 * score + 0.3 * (importance / 10)"""
+    score = item.get("score") or 0.0
+    if not isinstance(score, (int, float)):
+        score = 0.0
+    
+    metadata = item.get("metadata") or {}
+    importance = metadata.get("importance", 5)
+    try:
+        importance = max(1, min(10, int(importance)))
+    except (ValueError, TypeError):
+        importance = 5
+    
+    return 0.7 * float(score) + 0.3 * (importance / 10.0)
+
+
 def format_search_output(results: List[Dict[str, Any]], tags: Optional[List[str]] = None, threshold: Optional[float] = None) -> Dict[str, Any]:
     normalized = _normalize_results(results)
     filtered = _filter_by_tags(normalized, tags or [])
+    filtered = _filter_expired(filtered)
     if threshold is not None:
-        filtered = [item for item in filtered if item.get("score") is None or item.get("score") >= threshold]
+        filtered = [item for item in filtered if _get_combined_score(item) >= threshold]
     return {"results": filtered, "text": _format_memory_list(filtered)}
 
 
 def format_get_all_output(results: List[Dict[str, Any]], tags: Optional[List[str]] = None) -> Dict[str, Any]:
     normalized = _normalize_results(results)
     filtered = _filter_by_tags(normalized, tags or [])
+    filtered = _filter_expired(filtered)
     return {"results": filtered, "text": _format_memory_list(filtered)}
 
 

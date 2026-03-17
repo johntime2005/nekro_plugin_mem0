@@ -28,4 +28,9 @@ from .plugin import plugin
 # 导入插件方法以确保沙盒方法被注册
 from . import plugin_method  # noqa: F401
 
+# 导入引擎以触发注册
+from . import memory_engine_basic  # noqa: F401
+from . import memory_engine_hippo  # noqa: F401
+from . import memory_engine_emgas  # noqa: F401
+
 __all__ = ["plugin"]

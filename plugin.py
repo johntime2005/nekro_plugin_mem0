@@ -83,6 +83,11 @@ class PluginConfig(ConfigBase):
     MEMORY_SEARCH_SCORE_THRESHOLD: float = Field(
         default=0.7, title="搜索分数阈值", description="记忆搜索的最低相关度分数"
     )
+    IMPORTANCE_WEIGHT: float = Field(
+        default=0.3,
+        title="重要性权重",
+        description="importance 在排序/过滤中的权重（0.0-1.0），剩余为 score 权重。组合分数 = (1-weight)*score + weight*(importance/10)",
+    )
     SESSION_ISOLATION: bool = Field(
         default=True, title="会话隔离", description="是否启用会话隔离"
     )
@@ -95,6 +100,11 @@ class PluginConfig(ConfigBase):
         default=True,
         title="人设层绑定用户",
         description="启用后 persona 层同时使用 user_id+agent_id 进行隔离，避免不同用户共享同一 persona 记忆",
+    )
+    ENABLE_GUILD_SCOPE: bool = Field(
+        default=False,
+        title="启用群组层",
+        description="启用 Guild 层，允许群组内共享记忆（群聊场景）",
     )
     PRE_SEARCH_ENABLED: bool = Field(
         default=True, title="预搜索启用", description="是否启用预搜索功能"
@@ -136,6 +146,92 @@ class PluginConfig(ConfigBase):
         default=False,
         title="读取时自动迁移旧记忆",
         description="在兼容读取命中旧作用域时，自动复制写入当前新作用域（建议灰度开启）",
+    )
+    
+    DEDUP_ENABLED: bool = Field(
+        default=True,
+        title="启用去重",
+        description="添加记忆前检查重复，避免存储相似内容",
+    )
+    DEDUP_SIMILARITY_THRESHOLD: float = Field(
+        default=0.8,
+        title="去重相似度阈值",
+        description="相似度超过此值视为重复（0.0-1.0）",
+    )
+    DEDUP_SIMHASH_THRESHOLD: int = Field(
+        default=10,
+        title="SimHash 预筛阈值",
+        description="Hamming 距离超过此值跳过精确计算（性能优化）",
+    )
+    
+    AUTO_EXTRACT_ENABLED: bool = Field(
+        default=True,
+        title="启用被动提取",
+        description="每隔 N 轮对话自动从历史消息中提取记忆",
+    )
+    AUTO_EXTRACT_INTERVAL: int = Field(
+        default=3,
+        title="提取间隔（轮次）",
+        description="每隔多少轮对话触发一次被动提取（1-10）",
+    )
+    AUTO_EXTRACT_TARGET_LAYER: str = Field(
+        default="persona",
+        title="提取目标层级",
+        description="被动提取的记忆写入哪个层级（conversation/persona/global）",
+    )
+    
+    QUERY_REWRITE_ENABLED: bool = Field(
+        default=False,
+        title="启用查询改写",
+        description="预搜索时使用 LLM 改写查询以提升检索质量（会增加延迟）",
+    )
+    
+    MEMORY_ENGINE: str = Field(
+        default="basic",
+        title="记忆引擎",
+        description="选择记忆检索引擎：basic（向量搜索）、hippo（知识图谱+PPR）、emgas（激活扩散）",
+    )
+    
+    HIPPO_PPR_ALPHA: float = Field(
+        default=0.15,
+        title="HippoRAG PPR Alpha",
+        description="Personalized PageRank 重启概率",
+    )
+    HIPPO_HYBRID_WEIGHT: float = Field(
+        default=0.8,
+        title="HippoRAG 混合权重",
+        description="语义相似度权重（剩余为 PPR 权重）",
+    )
+    HIPPO_TOP_ENTITIES: int = Field(
+        default=10,
+        title="HippoRAG Top 实体数",
+        description="PPR 选择前 N 个高分实体",
+    )
+    HIPPO_MAX_CANDIDATES: int = Field(
+        default=200,
+        title="HippoRAG 最大候选数",
+        description="通过实体获取的最大候选记忆数",
+    )
+    
+    EMGAS_DECAY_RATE: float = Field(
+        default=0.01,
+        title="EMGAS 衰减率",
+        description="时间衰减参数 λ",
+    )
+    EMGAS_PRUNE_THRESHOLD: float = Field(
+        default=0.05,
+        title="EMGAS 剪枝阈值",
+        description="低于此激活值的节点被剪枝",
+    )
+    EMGAS_FIRING_THRESHOLD: float = Field(
+        default=0.1,
+        title="EMGAS 触发阈值",
+        description="节点激活值超过此值才传播能量",
+    )
+    EMGAS_PROPAGATION_DECAY: float = Field(
+        default=0.85,
+        title="EMGAS 传播衰减",
+        description="能量传播时的保留比例（0.85 = 15% 损失）",
     )
 
 

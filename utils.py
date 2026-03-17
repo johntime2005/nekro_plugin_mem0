@@ -33,21 +33,23 @@ class MemoryScope:
     user_id: Optional[str]
     agent_id: Optional[str]
     run_id: Optional[str]
+    guild_id: Optional[str] = None
     preset_title: Optional[str] = None
 
     def has_scope(self) -> bool:
-        return any([self.user_id, self.agent_id, self.run_id])
+        return any([self.user_id, self.agent_id, self.run_id, self.guild_id])
 
     @property
     def persona_id(self) -> Optional[str]:
         """别名：agent_id 即人设ID。"""
         return self.agent_id
 
-    def available_layers(self, enable_agent_layer: bool = True) -> dict:
+    def available_layers(self, enable_agent_layer: bool = True, enable_guild_layer: bool = False) -> dict:
         return {
             "conversation": bool(self.run_id),
             "persona": bool(self.agent_id) and enable_agent_layer,
             "global": bool(self.user_id),
+            "guild": bool(self.guild_id) and enable_guild_layer,
         }
 
     def _normalize_layer(self, layer: str) -> Optional[str]:
@@ -60,6 +62,9 @@ class MemoryScope:
             "agent": "persona",
             "global": "global",
             "user": "global",
+            "guild": "guild",
+            "group": "guild",
+            "channel": "guild",
         }
         return mapping.get((layer or "").lower())
 
@@ -68,6 +73,7 @@ class MemoryScope:
         layer: str,
         enable_agent_layer: bool = True,
         bind_persona_to_user: bool = False,
+        enable_guild_layer: bool = False,
     ) -> Optional[dict]:
         normalized = self._normalize_layer(layer)
         if normalized == "conversation" and self.run_id:
@@ -100,6 +106,13 @@ class MemoryScope:
                 "agent_id": None,
                 "run_id": None,
             }
+        if normalized == "guild" and enable_guild_layer and self.guild_id:
+            return {
+                "layer": "guild",
+                "user_id": self.guild_id,
+                "agent_id": None,
+                "run_id": None,
+            }
         return None
 
     def default_layer_order(
@@ -107,6 +120,7 @@ class MemoryScope:
         enable_session_layer: bool = True,
         enable_agent_layer: bool = True,
         prefer_long_term: bool = False,
+        enable_guild_layer: bool = False,
     ) -> List[str]:
         order: List[str] = []
         if prefer_long_term:
@@ -114,6 +128,8 @@ class MemoryScope:
                 order.append("persona")
             if self.user_id:
                 order.append("global")
+            if enable_guild_layer and self.guild_id:
+                order.append("guild")
             if enable_session_layer and self.run_id:
                 order.append("conversation")
         else:
@@ -123,6 +139,8 @@ class MemoryScope:
                 order.append("persona")
             if self.user_id:
                 order.append("global")
+            if enable_guild_layer and self.guild_id:
+                order.append("guild")
         if not order and self.run_id:
             # 即便关闭会话隔离，仍可在缺省场景下回退到对话层，避免无层级可用
             order.append("conversation")
@@ -134,6 +152,7 @@ class MemoryScope:
         enable_session_layer: bool = True,
         enable_agent_layer: bool = True,
         prefer_long_term: bool = False,
+        enable_guild_layer: bool = False,
     ) -> Optional[str]:
         """选择最合适的层级，优先使用显式指定，其次按默认优先级。"""
         if preferred:
@@ -141,14 +160,16 @@ class MemoryScope:
             if normalized and self.layer_ids(
                 normalized,
                 enable_agent_layer=enable_agent_layer,
+                enable_guild_layer=enable_guild_layer,
             ):
                 return normalized
         for layer in self.default_layer_order(
             enable_session_layer=enable_session_layer,
             enable_agent_layer=enable_agent_layer,
             prefer_long_term=prefer_long_term,
+            enable_guild_layer=enable_guild_layer,
         ):
-            if self.layer_ids(layer, enable_agent_layer=enable_agent_layer):
+            if self.layer_ids(layer, enable_agent_layer=enable_agent_layer, enable_guild_layer=enable_guild_layer):
                 return layer
         return None
 
@@ -217,17 +238,25 @@ def resolve_memory_scope(
         get_preset_id(resolved_run_source) if resolved_run_source else None
     )
 
-    # 调试日志：记录解析结果
+    resolved_guild_id: Optional[str] = None
+    if hasattr(ctx, 'group_id') and _safe_getattr(ctx, 'group_id'):
+        resolved_guild_id = _normalize(str(_safe_getattr(ctx, 'group_id')))
+    elif hasattr(ctx, 'channel_id') and _safe_getattr(ctx, 'channel_id'):
+        _chan = _normalize(str(_safe_getattr(ctx, 'channel_id')))
+        if _chan and _chan != resolved_user_id:
+            resolved_guild_id = _chan
+
     logger.info(
         f"[Memory] resolve_memory_scope 结果 - "
         f"user_id={resolved_user_id}, agent_id={resolved_agent_id}, "
-        f"run_id={resolved_run_id}, preset_title={preset_title}"
+        f"run_id={resolved_run_id}, guild_id={resolved_guild_id}, preset_title={preset_title}"
     )
 
     return MemoryScope(
         user_id=resolved_user_id,
         agent_id=resolved_agent_id,
         run_id=resolved_run_id,
+        guild_id=resolved_guild_id,
         preset_title=preset_title,
     )
 

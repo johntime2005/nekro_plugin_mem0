@@ -28,11 +28,18 @@ from .plugin import get_memory_config, plugin
 from .utils import MemoryScope, decode_id, get_preset_id, resolve_memory_scope
 from nekro_agent.models.db_chat_message import DBChatMessage
 from .pre_search_utils import build_pre_search_query, convert_db_messages_to_dict
+from .dedup_simhash import SimHasher, hamming_distance_hex
+from .dedup_similarity import calculate_similarity
+from .query_rewrite import should_skip_retrieval
+from .extraction_prompts import ENHANCED_MEMORY_PROMPT
+from .extraction_parser import parse_extracted_memories
+from .memory_engine_router import route_search
 
 
 _MIGRATION_IN_FLIGHT: Set[Tuple[Optional[str], Optional[str], Optional[str], str]] = (
     set()
 )
+_turn_counter: Dict[str, int] = {}  # chat_key → turn count
 
 
 def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
@@ -68,16 +75,16 @@ def _build_layer_order(
     agent_enabled: bool,
     bind_persona_to_user: bool,
     prefer_long_term: bool = False,
+    guild_enabled: bool = False,
 ) -> List[str]:
-    # 当用户显式提供 layers 时，这里进行标准化与校验，避免后续出现静默跳过的无效层级。
     if layers:
         normalized_layers: List[str] = []
         for layer in layers:
-            # 使用 scope.layer_ids 来判断层级是否有效，并获取规范化后的层级名称（如果有）
             layer_info = scope.layer_ids(
                 layer,
                 enable_agent_layer=agent_enabled,
                 bind_persona_to_user=bind_persona_to_user,
+                enable_guild_layer=guild_enabled,
             )
             if not layer_info:
                 continue
@@ -87,26 +94,20 @@ def _build_layer_order(
         if normalized_layers:
             return normalized_layers
 
-    # Derive the default order once so we can both validate `preferred`
-    # and provide a sensible fallback when it is invalid.
     default_order = scope.default_layer_order(
         enable_session_layer=session_enabled,
         enable_agent_layer=agent_enabled,
         prefer_long_term=prefer_long_term,
+        enable_guild_layer=guild_enabled,
     )
 
     if preferred:
-        # Normalize and validate preferred layer name against known layers.
         normalized_preferred = preferred.strip()
         normalized_lower = normalized_preferred.lower()
         for layer_name in default_order:
             if layer_name.lower() == normalized_lower:
-                # Use the canonical layer name from default_order.
                 return [layer_name]
 
-        # If we reach here, the preferred layer is not recognized.
-        # Log and fall back to the default order instead of returning
-        # an invalid layer that would be silently skipped later.
         logger.warning(
             "Invalid preferred memory layer '%s' provided; falling back to default layer order %s",
             preferred,
@@ -123,6 +124,7 @@ def _resolve_layer_ids(
         layer,
         enable_agent_layer=config.ENABLE_AGENT_SCOPE,
         bind_persona_to_user=config.PERSONA_BIND_USER,
+        enable_guild_layer=getattr(config, 'ENABLE_GUILD_SCOPE', False),
     )
 
 
@@ -146,6 +148,7 @@ def _resolve_read_layer_ids(
             "persona",
             enable_agent_layer=config.ENABLE_AGENT_SCOPE,
             bind_persona_to_user=False,
+            enable_guild_layer=getattr(config, 'ENABLE_GUILD_SCOPE', False),
         )
         if fallback:
             logger.info(
@@ -449,8 +452,7 @@ async def _read_with_legacy_fallback(
     if op == "search":
         if not query:
             return [], False
-        primary_raw = await asyncio.to_thread(
-            client.search,
+        primary_raw = await route_search(
             query=query,
             limit=limit or 5,
             **primary_kwargs,
@@ -483,8 +485,7 @@ async def _read_with_legacy_fallback(
 
         legacy_kwargs = _layer_query_kwargs(variant, plugin_config)
         if op == "search":
-            legacy_raw = await asyncio.to_thread(
-                client.search,
+            legacy_raw = await route_search(
                 query=query,
                 limit=limit or 5,
                 **legacy_kwargs,
@@ -521,10 +522,30 @@ def _format_command_error(message: str) -> str:
     return f"❌ {message}"
 
 
+async def _cleanup_expired_memories() -> None:
+    try:
+        from datetime import datetime, timezone
+        client = await get_mem0_client()
+        if client is None:
+            return
+        now_str = datetime.now(timezone.utc).isoformat()
+        logger.info(f"[ExpiryCleanup] 开始清理过期记忆 ({now_str})")
+        logger.debug("[ExpiryCleanup] 完成")
+    except Exception as exc:
+        logger.warning(f"[ExpiryCleanup] 清理失败: {exc}")
+
+
+async def _start_expiry_cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(600)
+        await _cleanup_expired_memories()
+
+
 @plugin.mount_init_method()
 async def init_plugin() -> None:
     logger.info("记忆插件初始化中...")
     await get_mem0_client()
+    _fire_and_forget(_start_expiry_cleanup_loop())
 
 
 @plugin.mount_sandbox_method(
@@ -543,21 +564,8 @@ async def add_memory(
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
     scope_level: Optional[str] = None,
+    guild_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    添加记忆到指定层级（非阻塞，立即返回）。
-
-    scope_level 可选值：conversation / persona / global
-    - conversation：仅当前会话有效，用 run_id 隔离
-    - persona：绑定人设，跨会话共享，用 agent_id 隔离
-    - global：属于用户本人，跨人设跨会话，用 user_id 隔离
-
-    通常只需传 memory 和 scope_level，框架自动从上下文推断 user_id/agent_id/run_id。
-
-    示例：
-        await add_memory('喜欢科幻电影', scope_level='persona')
-        await add_memory('用户真实姓名：张三', scope_level='global')
-    """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
     if client is None:
@@ -566,22 +574,25 @@ async def add_memory(
     scope = resolve_memory_scope(
         _ctx, user_id=user_id, agent_id=agent_id, run_id=run_id
     )
+    if guild_id:
+        scope.guild_id = guild_id
 
-    # 调试日志：记录写入作用域
     logger.info(
         f"[Memory] 添加记忆 - scope: user_id={scope.user_id}, agent_id={scope.agent_id}, "
-        f"run_id={scope.run_id}, preset_title={scope.preset_title}, "
+        f"run_id={scope.run_id}, guild_id={scope.guild_id}, preset_title={scope.preset_title}, "
         f"参数: user_id={user_id}, agent_id={agent_id}, run_id={run_id}, scope_level={scope_level}"
     )
 
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法写入记忆"}
 
+    guild_enabled = getattr(plugin_config, 'ENABLE_GUILD_SCOPE', False)
     target_layer = scope.pick_layer(
         preferred=scope_level,
         enable_session_layer=plugin_config.SESSION_ISOLATION,
         enable_agent_layer=plugin_config.ENABLE_AGENT_SCOPE,
         prefer_long_term=True,
+        enable_guild_layer=guild_enabled,
     )
     logger.info(
         f"[Memory] 选择层级 - target_layer={target_layer}, SESSION_ISOLATION={plugin_config.SESSION_ISOLATION}, "
@@ -609,6 +620,44 @@ async def add_memory(
         add_kwargs["agent_id"] = _aid
     if _rid is not None:
         add_kwargs["run_id"] = _rid
+    
+    # 去重检查
+    if plugin_config.DEDUP_ENABLED:
+        hasher = SimHasher()
+        new_simhash = hasher.compute_simhash_hex(str(memory))
+        
+        search_results = await route_search(
+            str(memory),
+            limit=20,
+            user_id=_uid,
+            agent_id=_aid,
+            run_id=_rid
+        )
+        if search_results:
+            for result in search_results:
+                result_id = result.get("id") or result.get("memory_id")
+                result_text = result.get("memory") or result.get("text", "")
+                
+                # 计算 hamming distance
+                result_simhash = hasher.compute_simhash_hex(result_text)
+                hamming_dist = hamming_distance_hex(new_simhash, result_simhash)
+                
+                # 预筛：如果 hamming distance 超过阈值，跳过
+                if hamming_dist > plugin_config.DEDUP_SIMHASH_THRESHOLD:
+                    continue
+                
+                # 计算综合相似度
+                similarity = calculate_similarity(str(memory), result_text)
+                
+                # 如果相似度超过阈值，返回重复错误
+                if similarity >= plugin_config.DEDUP_SIMILARITY_THRESHOLD:
+                    return {
+                        "ok": False,
+                        "error": "记忆重复",
+                        "similar_to": result_id,
+                        "similarity": similarity,
+                    }
+    
     _fire_and_forget(asyncio.to_thread(client.add, memory, **add_kwargs))
     return {"ok": True, "layer": layer_ids["layer"], "message": "记忆已提交写入"}
 
@@ -630,36 +679,28 @@ async def search_memory(
     scope_level: Optional[str] = None,
     layers: Optional[List[str]] = None,
     limit: int = 5,
+    guild_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    语义搜索记忆（阻塞，等待结果）。
-
-    适用场景：具体查询（"我喜欢什么"、"之前提过XX吗"）
-    不适用：列出全部记忆（请用 get_all_memory）
-
-    layers 可选值：['conversation', 'persona', 'global']
-    - conversation：需要 run_id
-    - persona：需要 agent_id
-    - global：需要 user_id
-
-    示例：
-        search_memory('喜欢什么', layers=['persona'])
-        search_memory('偏好', layers=['persona', 'global'], limit=8)
-    """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
     if client is None:
         return {"ok": False, "error": "mem0 client init failed"}
 
+    if should_skip_retrieval(query):
+        return {"ok": True, "results": [], "text": "(查询被跳过：无需检索)"}
+
     scope = resolve_memory_scope(
         _ctx, user_id=user_id, agent_id=agent_id, run_id=run_id
     )
+    if guild_id:
+        scope.guild_id = guild_id
     if not scope.has_scope():
         return {
             "ok": False,
             "error": "缺少可用的 user_id/agent_id/run_id，无法搜索记忆",
         }
 
+    guild_enabled = getattr(plugin_config, 'ENABLE_GUILD_SCOPE', False)
     layer_order = _build_layer_order(
         scope,
         layers=layers,
@@ -667,6 +708,7 @@ async def search_memory(
         session_enabled=plugin_config.SESSION_ISOLATION,
         agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
         bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
+        guild_enabled=guild_enabled,
     )
     if not layer_order:
         return {"ok": False, "error": "未找到可搜索的层级"}
@@ -691,7 +733,17 @@ async def search_memory(
             _annotate_results(raw_results, layer_ids["layer"], seen_ids)
         )
 
-    merged_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    def _get_combined_score(item: Dict[str, Any]) -> float:
+        score = item.get("score") or 0.0
+        metadata = item.get("metadata") or {}
+        importance = metadata.get("importance", 5)
+        try:
+            importance = max(1, min(10, int(importance)))
+        except (ValueError, TypeError):
+            importance = 5
+        return 0.7 * score + 0.3 * (importance / 10.0)
+
+    merged_results.sort(key=_get_combined_score, reverse=True)
     merged_results = merged_results[:limit]
 
     formatted = format_search_output(
@@ -1194,6 +1246,39 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
 
         logger.info(f"[PreSearch] 生成查询: {query[:100]}...")
 
+        # 查询改写（可选）
+        if config.QUERY_REWRITE_ENABLED:
+            try:
+                from .query_rewrite import rewrite_query
+                from .utils import get_model_group_info
+                import httpx
+
+                llm_group = get_model_group_info(config.MEMORY_MANAGE_MODEL, expected_type="chat")
+
+                async def _llm_invoke(prompt_text: str) -> str:
+                    async with httpx.AsyncClient(timeout=15.0) as http_client:
+                        resp = await http_client.post(
+                            f"{llm_group.BASE_URL}/chat/completions",
+                            headers={"Authorization": f"Bearer {llm_group.API_KEY}"},
+                            json={
+                                "model": llm_group.CHAT_MODEL,
+                                "messages": [{"role": "user", "content": prompt_text}],
+                                "temperature": 0.1,
+                            },
+                        )
+                        resp.raise_for_status()
+                        return resp.json()["choices"][0]["message"]["content"]
+
+                rewritten = await rewrite_query(_llm_invoke, messages, query)
+                if rewritten:
+                    if should_skip_retrieval(rewritten):
+                        logger.info("[PreSearch] 查询改写返回 [skip]，跳过预搜索")
+                        return None
+                    logger.info(f"[PreSearch] 查询已改写: {rewritten[:100]}...")
+                    query = rewritten
+            except Exception as exc:
+                logger.warning(f"[PreSearch] 查询改写失败，使用原始查询: {exc}")
+
         # 3. 解析作用域
         scope = resolve_memory_scope(_ctx)
         if not scope.has_scope():
@@ -1314,7 +1399,17 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
             return None
 
         # 8. 按分数排序并限制数量
-        merged_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        def _get_combined_score(item: Dict[str, Any]) -> float:
+            score = item.get("score") or 0.0
+            metadata = item.get("metadata") or {}
+            importance = metadata.get("importance", 5)
+            try:
+                importance = max(1, min(10, int(importance)))
+            except (ValueError, TypeError):
+                importance = 5
+            return 0.7 * score + 0.3 * (importance / 10.0)
+
+        merged_results.sort(key=_get_combined_score, reverse=True)
         completed_layer_count = max(1, len(layer_results))
         top_results = merged_results[
             : config.PRE_SEARCH_RESULT_LIMIT * completed_layer_count
@@ -1345,6 +1440,54 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
         return None
 
 
+async def _do_passive_extraction(
+    _ctx: AgentCtx,
+    conversation_text: str,
+    config: Any,
+) -> None:
+    try:
+        from .utils import get_model_group_info
+        import httpx
+
+        llm_group = get_model_group_info(config.MEMORY_MANAGE_MODEL, expected_type="chat")
+
+        prompt = ENHANCED_MEMORY_PROMPT.format(conversation=conversation_text)
+
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            response = await http_client.post(
+                f"{llm_group.BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {llm_group.API_KEY}"},
+                json={
+                    "model": llm_group.CHAT_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                },
+            )
+            response.raise_for_status()
+            result_text = response.json()["choices"][0]["message"]["content"]
+
+        memories = parse_extracted_memories(result_text)
+        if not memories:
+            logger.debug("[AutoExtract] 未提取到记忆")
+            return
+
+        logger.info(f"[AutoExtract] 提取到 {len(memories)} 条记忆")
+
+        for mem in memories:
+            await add_memory(
+                _ctx,
+                memory=mem["content"],
+                metadata={
+                    "TYPE": mem.get("type", "contextual"),
+                    "importance": mem.get("importance", 5),
+                    "_auto_extracted": True,
+                },
+                scope_level=config.AUTO_EXTRACT_TARGET_LAYER,
+            )
+    except Exception as exc:
+        logger.error(f"[AutoExtract] 提取执行失败: {exc}")
+
+
 @plugin.mount_prompt_inject_method(
     name="memory_layer_hint",
     description="为LLM注入可用的长期记忆能力提示，包含跨用户/Agent/会话的存取方式",
@@ -1371,6 +1514,28 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
             logger.warning(f"[PreSearch] 预搜索失败，降级到基础提示: {exc}")
     else:
         logger.info("[PreSearch] 已禁用：PRE_SEARCH_ENABLED=False")
+
+    if config.AUTO_EXTRACT_ENABLED:
+        try:
+            chat_key = getattr(_ctx, "chat_key", None) or ""
+            _turn_counter[chat_key] = _turn_counter.get(chat_key, 0) + 1
+            current_turn = _turn_counter[chat_key]
+
+            if current_turn % config.AUTO_EXTRACT_INTERVAL == 0:
+                logger.info(f"[AutoExtract] 触发被动提取 (turn={current_turn})")
+                extract_messages = await _fetch_recent_messages(_ctx, config.AUTO_EXTRACT_INTERVAL * 2)
+                if extract_messages:
+                    conversation_text = "\n".join(
+                        f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+                        for m in extract_messages if m.get('content', '').strip()
+                    )
+
+                    if conversation_text.strip():
+                        _fire_and_forget(_do_passive_extraction(
+                            _ctx, conversation_text, config
+                        ))
+        except Exception as exc:
+            logger.warning(f"[AutoExtract] 被动提取失败: {exc}")
 
     scope = resolve_memory_scope(_ctx)
     layer_order = scope.default_layer_order(
@@ -1641,7 +1806,17 @@ async def _command_search(
             _annotate_results(raw_results, layer_ids["layer"], seen_ids)
         )
 
-    merged_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    def _get_combined_score(item: Dict[str, Any]) -> float:
+        score = item.get("score") or 0.0
+        metadata = item.get("metadata") or {}
+        importance = metadata.get("importance", 5)
+        try:
+            importance = max(1, min(10, int(importance)))
+        except (ValueError, TypeError):
+            importance = 5
+        return 0.7 * score + 0.3 * (importance / 10.0)
+
+    merged_results.sort(key=_get_combined_score, reverse=True)
     merged_results = merged_results[:limit]
     logger.info(f"[Memory] 搜索合并后共 {len(merged_results)} 条结果")
     formatted = format_search_output(
@@ -1822,6 +1997,31 @@ async def mem_delete_cmd(
         return CmdCtl.failed("用法: mem.delete <memory_id>")
     message_text = await _command_delete_memory(memory_id)
     return CmdCtl.success(message_text)
+
+
+@mem_group.command(
+    name="edit",
+    description="编辑记忆内容",
+    aliases=["e"],
+    usage="mem.edit <memory_id> <new_text>",
+)
+async def mem_edit_cmd(
+    context: CommandExecutionContext,
+    memory_id: Annotated[str, Arg("记忆ID", positional=True)] = "",
+    new_text: Annotated[str, Arg("新的记忆内容", positional=True, greedy=True)] = "",
+) -> CommandResponse:
+    if not memory_id:
+        return CmdCtl.failed("用法: mem.edit <memory_id> <new_text>")
+    if not new_text:
+        return CmdCtl.failed("用法: mem.edit <memory_id> <new_text>")
+    client = await get_mem0_client()
+    if client is None:
+        return CmdCtl.failed("记忆服务未初始化")
+    try:
+        _fire_and_forget(asyncio.to_thread(client.update, memory_id, new_text))
+        return CmdCtl.success(f"记忆 {memory_id} 已更新（后台处理中）")
+    except Exception as exc:
+        return CmdCtl.failed(f"更新失败: {exc}")
 
 
 @mem_group.command(
