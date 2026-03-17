@@ -64,6 +64,15 @@ def _load_plugin_method_module():
         MEMORY_SEARCH_SCORE_THRESHOLD = 0.7
         SESSION_ISOLATION = True
         PRE_SEARCH_ENABLED = True
+        IMPORTANCE_WEIGHT = 0.3
+        PRE_SEARCH_SCORE_THRESHOLD = 0.35
+        QUERY_REWRITE_ENABLED = False
+        LEGACY_SCOPE_FALLBACK_ENABLED = True
+        AUTO_MIGRATE_ON_READ = False
+        AUTO_EXTRACT_ENABLED = False
+        AUTO_EXTRACT_INTERVAL = 3
+        AUTO_EXTRACT_TARGET_LAYER = "persona"
+        DEDUP_ENABLED = False
 
     class _DummyPlugin:
         def mount_init_method(self):
@@ -123,13 +132,29 @@ def _load_plugin_method_module():
                 lines.append(f"- {text}")
         return "\n".join(lines) if lines else "(无结果)"
 
-    def _format_search_output(results, tags=None, threshold=None):
+    def _get_combined_score(item, importance_weight=0.3):
+        score = item.get("score") or 0.0
+        if not isinstance(score, (int, float)):
+            score = 0.0
+        metadata = item.get("metadata") or {}
+        importance = metadata.get("importance", 5)
+        try:
+            importance = max(1, min(10, int(importance)))
+        except (ValueError, TypeError):
+            importance = 5
+        w = max(0.0, min(1.0, float(importance_weight)))
+        return (1.0 - w) * float(score) + w * (importance / 10.0)
+
+    def _format_search_output(
+        results, tags=None, threshold=None, importance_weight=0.3
+    ):
         filtered = _normalize_results(results)
         if threshold is not None:
             filtered = [
                 item
                 for item in filtered
-                if item.get("score") is None or item.get("score") >= threshold
+                if _get_combined_score(item, importance_weight=importance_weight)
+                >= threshold
             ]
         return {"results": filtered, "text": _format_memory_list(filtered)}
 
@@ -137,13 +162,17 @@ def _load_plugin_method_module():
     setattr(
         output_stub,
         "format_get_all_output",
-        lambda results, *args, **kwargs: {"results": _normalize_results(results), "text": _format_memory_list(_normalize_results(results))},
+        lambda results, *args, **kwargs: {
+            "results": _normalize_results(results),
+            "text": _format_memory_list(_normalize_results(results)),
+        },
     )
     setattr(output_stub, "format_history_output", lambda *args, **kwargs: [])
     setattr(output_stub, "format_history_text", lambda *args, **kwargs: "")
     setattr(output_stub, "format_search_output", _format_search_output)
     setattr(output_stub, "normalize_results", _normalize_results)
     setattr(output_stub, "_format_memory_list", _format_memory_list)
+    setattr(output_stub, "_get_combined_score", _get_combined_score)
     sys.modules[f"{package_name}.mem0_output_formatter"] = output_stub
 
     pre_search_stub = types.ModuleType(f"{package_name}.pre_search_utils")
@@ -369,11 +398,54 @@ def test_pre_search_second_pass_conversation_fallback_when_first_pass_empty() ->
     assert "conversation" in call_layers
 
 
+def test_pre_search_passes_threshold_with_decent_score() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    class _Ctx:
+        chat_key = "chat_decent"
+
+    async def _fake_fetch_recent_messages(_ctx, _count):
+        return [{"role": "user", "content": "用户喜欢喝茶"}]
+
+    async def _fake_search_single_layer(_client, _query, layer_ids, _limit, _config):
+        # score=0.5, importance=5 → combined = 0.7*0.5 + 0.3*0.5 = 0.5 > 0.35
+        return (
+            layer_ids["layer"],
+            [
+                {
+                    "id": "mem_decent",
+                    "memory": "用户喜欢喝茶",
+                    "score": 0.5,
+                    "metadata": {"importance": 5},
+                }
+            ],
+        )
+
+    async def _fake_get_mem0_client():
+        return object()
+
+    setattr(plugin_method, "_fetch_recent_messages", _fake_fetch_recent_messages)
+    setattr(
+        plugin_method,
+        "build_pre_search_query",
+        lambda *args, **kwargs: "用户喜欢喝茶",
+    )
+    setattr(plugin_method, "_search_single_layer", _fake_search_single_layer)
+    setattr(plugin_method, "get_mem0_client", _fake_get_mem0_client)
+
+    result = __import__("asyncio").run(plugin_method._execute_pre_search(_Ctx()))
+
+    assert result is not None
+    assert "用户喜欢喝茶" in result
+
+
 def test_inject_memory_prompt_returns_base_when_pre_search_empty() -> None:
     plugin_method = _load_plugin_method_module()
 
     class _Ctx:
         chat_key = "chat_3"
+
+    original_execute_pre_search = plugin_method._execute_pre_search
 
     async def _fake_execute_pre_search(_ctx):
         return None
@@ -382,8 +454,10 @@ def test_inject_memory_prompt_returns_base_when_pre_search_empty() -> None:
 
     output = __import__("asyncio").run(plugin_method.inject_memory_prompt(_Ctx()))
 
+    setattr(plugin_method, "_execute_pre_search", original_execute_pre_search)
+
     assert "📚 【预加载记忆】" not in output
-    assert "你可以使用记忆插件" in output
+    assert "长期记忆插件" in output
 
 
 def test_pre_search_skip_reason_no_messages() -> None:
@@ -402,6 +476,18 @@ def test_pre_search_skip_reason_no_messages() -> None:
     assert result is None
 
 
+def test_combined_score_uses_config_weight() -> None:
+    plugin_method = _load_plugin_method_module()
+    _get_combined_score = getattr(
+        sys.modules["nekro_plugin_mem0.mem0_output_formatter"], "_get_combined_score"
+    )
+
+    item = {"score": 0.8, "metadata": {"importance": 5}}
+    # (1-0.5)*0.8 + 0.5*(5/10) = 0.4 + 0.25 = 0.65
+    result = _get_combined_score(item, importance_weight=0.5)
+    assert result == 0.65
+
+
 if __name__ == "__main__":
     test_agent_scope_switch_disables_persona_layer()
     test_add_default_prefers_long_term_layer()
@@ -412,4 +498,6 @@ if __name__ == "__main__":
     test_pre_search_second_pass_conversation_fallback_when_first_pass_empty()
     test_inject_memory_prompt_returns_base_when_pre_search_empty()
     test_pre_search_skip_reason_no_messages()
+    test_pre_search_passes_threshold_with_decent_score()
+    test_combined_score_uses_config_weight()
     print("✅ test_memory_scope_risks passed")

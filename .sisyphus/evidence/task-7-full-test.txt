@@ -1,0 +1,15 @@
+PASSED  test_agent_scope_switch_disables_persona_layer
+PASSED  test_add_default_prefers_long_term_layer
+PASSED  test_persona_bind_user_requires_user_and_includes_user_id
+PASSED  test_layer_query_kwargs_filters_none_values
+PASSED  test_read_layer_fallback_keeps_legacy_persona_readability
+PASSED  test_pre_search_falls_back_when_threshold_filters_all
+PASSED  test_pre_search_second_pass_conversation_fallback_when_first_pass_empty
+PASSED  test_inject_memory_prompt_returns_base_when_pre_search_empty
+PASSED  test_pre_search_skip_reason_no_messages
+PASSED  test_pre_search_passes_threshold_with_decent_score
+PASSED  test_combined_score_uses_config_weight
+
+============================================================
+11 passed, 0 failed, 11 total
+✅ All tests passed

@@ -1443,13 +1443,24 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
         if pre_search_threshold is None:
             pre_search_threshold = config.MEMORY_SEARCH_SCORE_THRESHOLD
 
+        # 诊断日志：记录 top-5 组合分数
+        if top_results:
+            _scores = [
+                _get_combined_score(item, importance_weight=config.IMPORTANCE_WEIGHT)
+                for item in top_results[:5]
+            ]
+            logger.debug(
+                f"[PreSearch] top-5 combined scores: {[f'{s:.3f}' for s in _scores]}, "
+                f"threshold={pre_search_threshold}"
+            )
+
         result_text, injected_results, threshold_fallback_hit = (
             _select_pre_search_injection_text(
                 top_results, threshold=pre_search_threshold
             )
         )
         if threshold_fallback_hit:
-            logger.info("[PreSearch] 阈值过滤后为空，回退为低阈值结果注入")
+            logger.debug("[PreSearch] 阈值过滤后为空，回退为低阈值结果注入")
         if not result_text:
             logger.debug("[PreSearch] 阈值过滤后无可注入结果，跳过预搜索")
             _pre_search_skip("NO_INJECTABLE_TEXT", "结果存在但不可格式化为可注入文本")
