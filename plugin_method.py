@@ -22,6 +22,7 @@ from .mem0_output_formatter import (
     format_search_output,
     normalize_results,
     _format_memory_list,
+    _get_combined_score,
 )
 from .mem0_utils import get_mem0_client
 from .plugin import get_memory_config, plugin
@@ -124,7 +125,7 @@ def _resolve_layer_ids(
         layer,
         enable_agent_layer=config.ENABLE_AGENT_SCOPE,
         bind_persona_to_user=config.PERSONA_BIND_USER,
-        enable_guild_layer=getattr(config, 'ENABLE_GUILD_SCOPE', False),
+        enable_guild_layer=getattr(config, "ENABLE_GUILD_SCOPE", False),
     )
 
 
@@ -148,7 +149,7 @@ def _resolve_read_layer_ids(
             "persona",
             enable_agent_layer=config.ENABLE_AGENT_SCOPE,
             bind_persona_to_user=False,
-            enable_guild_layer=getattr(config, 'ENABLE_GUILD_SCOPE', False),
+            enable_guild_layer=getattr(config, "ENABLE_GUILD_SCOPE", False),
         )
         if fallback:
             logger.info(
@@ -525,6 +526,7 @@ def _format_command_error(message: str) -> str:
 async def _cleanup_expired_memories() -> None:
     try:
         from datetime import datetime, timezone
+
         client = await get_mem0_client()
         if client is None:
             return
@@ -552,8 +554,7 @@ async def init_plugin() -> None:
     SandboxMethodType.BEHAVIOR,
     name="添加记忆",
     description=(
-        "添加记忆（非阻塞）。"
-        "示例：add_memory('用户喜欢猫', scope_level='global')"
+        "添加记忆（非阻塞）。示例：add_memory('用户喜欢猫', scope_level='global')"
     ),
 )
 async def add_memory(
@@ -600,7 +601,7 @@ async def add_memory(
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法写入记忆"}
 
-    guild_enabled = getattr(plugin_config, 'ENABLE_GUILD_SCOPE', False)
+    guild_enabled = getattr(plugin_config, "ENABLE_GUILD_SCOPE", False)
     target_layer = scope.pick_layer(
         preferred=scope_level,
         enable_session_layer=plugin_config.SESSION_ISOLATION,
@@ -625,8 +626,16 @@ async def add_memory(
         "metadata": metadata or {},
         "infer": False,
     }
-    _uid = layer_ids["user_id"] if (plugin_config.ENABLE_AGENT_SCOPE or target_layer == "global") else None
-    _aid = layer_ids["agent_id"] if (plugin_config.ENABLE_AGENT_SCOPE or target_layer == "persona") else None
+    _uid = (
+        layer_ids["user_id"]
+        if (plugin_config.ENABLE_AGENT_SCOPE or target_layer == "global")
+        else None
+    )
+    _aid = (
+        layer_ids["agent_id"]
+        if (plugin_config.ENABLE_AGENT_SCOPE or target_layer == "persona")
+        else None
+    )
     _rid = layer_ids["run_id"]
     if _uid is not None:
         add_kwargs["user_id"] = _uid
@@ -634,35 +643,31 @@ async def add_memory(
         add_kwargs["agent_id"] = _aid
     if _rid is not None:
         add_kwargs["run_id"] = _rid
-    
+
     # 去重检查
     if plugin_config.DEDUP_ENABLED:
         hasher = SimHasher()
         new_simhash = hasher.compute_simhash_hex(str(memory))
-        
+
         search_results = await route_search(
-            str(memory),
-            limit=20,
-            user_id=_uid,
-            agent_id=_aid,
-            run_id=_rid
+            str(memory), limit=20, user_id=_uid, agent_id=_aid, run_id=_rid
         )
         if search_results:
             for result in search_results:
                 result_id = result.get("id") or result.get("memory_id")
                 result_text = result.get("memory") or result.get("text", "")
-                
+
                 # 计算 hamming distance
                 result_simhash = hasher.compute_simhash_hex(result_text)
                 hamming_dist = hamming_distance_hex(new_simhash, result_simhash)
-                
+
                 # 预筛：如果 hamming distance 超过阈值，跳过
                 if hamming_dist > plugin_config.DEDUP_SIMHASH_THRESHOLD:
                     continue
-                
+
                 # 计算综合相似度
                 similarity = calculate_similarity(str(memory), result_text)
-                
+
                 # 如果相似度超过阈值，返回重复错误
                 if similarity >= plugin_config.DEDUP_SIMILARITY_THRESHOLD:
                     return {
@@ -671,7 +676,7 @@ async def add_memory(
                         "similar_to": result_id,
                         "similarity": similarity,
                     }
-    
+
     _fire_and_forget(asyncio.to_thread(client.add, memory, **add_kwargs))
     return {"ok": True, "layer": layer_ids["layer"], "message": "记忆已提交写入"}
 
@@ -722,7 +727,7 @@ async def search_memory(
             "error": "缺少可用的 user_id/agent_id/run_id，无法搜索记忆",
         }
 
-    guild_enabled = getattr(plugin_config, 'ENABLE_GUILD_SCOPE', False)
+    guild_enabled = getattr(plugin_config, "ENABLE_GUILD_SCOPE", False)
     layer_order = _build_layer_order(
         scope,
         layers=layers,
@@ -755,21 +760,18 @@ async def search_memory(
             _annotate_results(raw_results, layer_ids["layer"], seen_ids)
         )
 
-    def _get_combined_score(item: Dict[str, Any]) -> float:
-        score = item.get("score") or 0.0
-        metadata = item.get("metadata") or {}
-        importance = metadata.get("importance", 5)
-        try:
-            importance = max(1, min(10, int(importance)))
-        except (ValueError, TypeError):
-            importance = 5
-        return 0.7 * score + 0.3 * (importance / 10.0)
-
-    merged_results.sort(key=_get_combined_score, reverse=True)
+    merged_results.sort(
+        key=lambda item: _get_combined_score(
+            item, importance_weight=plugin_config.IMPORTANCE_WEIGHT
+        ),
+        reverse=True,
+    )
     merged_results = merged_results[:limit]
 
     formatted = format_search_output(
-        merged_results, threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD
+        merged_results,
+        threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD,
+        importance_weight=plugin_config.IMPORTANCE_WEIGHT,
     )
     return {"ok": True, **formatted}
 
@@ -846,10 +848,7 @@ async def get_all_memory(
 @plugin.mount_sandbox_method(
     SandboxMethodType.BEHAVIOR,
     name="更新记忆",
-    description=(
-        "更新记忆内容（非阻塞）。"
-        "示例：update_memory(memory_id, '新内容')"
-    ),
+    description=("更新记忆内容（非阻塞）。示例：update_memory(memory_id, '新内容')"),
 )
 async def update_memory(
     _ctx: Optional[AgentCtx],
@@ -909,8 +908,7 @@ async def delete_memory(
     SandboxMethodType.BEHAVIOR,
     name="删除作用域记忆",
     description=(
-        "批量删除记忆（非阻塞，危险操作）。"
-        "示例：delete_all_memory(layers=['global'])"
+        "批量删除记忆（非阻塞，危险操作）。示例：delete_all_memory(layers=['global'])"
     ),
 )
 async def delete_all_memory(
@@ -979,8 +977,7 @@ async def delete_all_memory(
     SandboxMethodType.AGENT,
     name="获取记忆历史",
     description=(
-        "查看记忆历史版本（阻塞，等待结果）。"
-        "示例：get_memory_history(memory_id)"
+        "查看记忆历史版本（阻塞，等待结果）。示例：get_memory_history(memory_id)"
     ),
 )
 async def get_memory_history(
@@ -1032,6 +1029,7 @@ async def memory_command(
     """
     if isinstance(payload, str):
         import json as _json
+
         try:
             payload = _json.loads(payload)
         except (ValueError, TypeError):
@@ -1282,7 +1280,9 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
                 from .utils import get_model_group_info
                 import httpx
 
-                llm_group = get_model_group_info(config.MEMORY_MANAGE_MODEL, expected_type="chat")
+                llm_group = get_model_group_info(
+                    config.MEMORY_MANAGE_MODEL, expected_type="chat"
+                )
 
                 async def _llm_invoke(prompt_text: str) -> str:
                     async with httpx.AsyncClient(timeout=15.0) as http_client:
@@ -1428,25 +1428,24 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
             return None
 
         # 8. 按分数排序并限制数量
-        def _get_combined_score(item: Dict[str, Any]) -> float:
-            score = item.get("score") or 0.0
-            metadata = item.get("metadata") or {}
-            importance = metadata.get("importance", 5)
-            try:
-                importance = max(1, min(10, int(importance)))
-            except (ValueError, TypeError):
-                importance = 5
-            return 0.7 * score + 0.3 * (importance / 10.0)
-
-        merged_results.sort(key=_get_combined_score, reverse=True)
+        merged_results.sort(
+            key=lambda item: _get_combined_score(
+                item, importance_weight=config.IMPORTANCE_WEIGHT
+            ),
+            reverse=True,
+        )
         completed_layer_count = max(1, len(layer_results))
         top_results = merged_results[
             : config.PRE_SEARCH_RESULT_LIMIT * completed_layer_count
         ]
 
+        pre_search_threshold = config.PRE_SEARCH_SCORE_THRESHOLD
+        if pre_search_threshold is None:
+            pre_search_threshold = config.MEMORY_SEARCH_SCORE_THRESHOLD
+
         result_text, injected_results, threshold_fallback_hit = (
             _select_pre_search_injection_text(
-                top_results, threshold=config.MEMORY_SEARCH_SCORE_THRESHOLD
+                top_results, threshold=pre_search_threshold
             )
         )
         if threshold_fallback_hit:
@@ -1478,7 +1477,9 @@ async def _do_passive_extraction(
         from .utils import get_model_group_info
         import httpx
 
-        llm_group = get_model_group_info(config.MEMORY_MANAGE_MODEL, expected_type="chat")
+        llm_group = get_model_group_info(
+            config.MEMORY_MANAGE_MODEL, expected_type="chat"
+        )
 
         prompt = ENHANCED_MEMORY_PROMPT.format(conversation=conversation_text)
 
@@ -1552,17 +1553,20 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
 
             if current_turn % config.AUTO_EXTRACT_INTERVAL == 0:
                 logger.info(f"[AutoExtract] 触发被动提取 (turn={current_turn})")
-                extract_messages = await _fetch_recent_messages(_ctx, config.AUTO_EXTRACT_INTERVAL * 2)
+                extract_messages = await _fetch_recent_messages(
+                    _ctx, config.AUTO_EXTRACT_INTERVAL * 2
+                )
                 if extract_messages:
                     conversation_text = "\n".join(
                         f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-                        for m in extract_messages if m.get('content', '').strip()
+                        for m in extract_messages
+                        if m.get("content", "").strip()
                     )
 
                     if conversation_text.strip():
-                        _fire_and_forget(_do_passive_extraction(
-                            _ctx, conversation_text, config
-                        ))
+                        _fire_and_forget(
+                            _do_passive_extraction(_ctx, conversation_text, config)
+                        )
         except Exception as exc:
             logger.warning(f"[AutoExtract] 被动提取失败: {exc}")
 
@@ -1835,21 +1839,18 @@ async def _command_search(
             _annotate_results(raw_results, layer_ids["layer"], seen_ids)
         )
 
-    def _get_combined_score(item: Dict[str, Any]) -> float:
-        score = item.get("score") or 0.0
-        metadata = item.get("metadata") or {}
-        importance = metadata.get("importance", 5)
-        try:
-            importance = max(1, min(10, int(importance)))
-        except (ValueError, TypeError):
-            importance = 5
-        return 0.7 * score + 0.3 * (importance / 10.0)
-
-    merged_results.sort(key=_get_combined_score, reverse=True)
+    merged_results.sort(
+        key=lambda item: _get_combined_score(
+            item, importance_weight=plugin_config.IMPORTANCE_WEIGHT
+        ),
+        reverse=True,
+    )
     merged_results = merged_results[:limit]
     logger.info(f"[Memory] 搜索合并后共 {len(merged_results)} 条结果")
     formatted = format_search_output(
-        merged_results, threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD
+        merged_results,
+        threshold=plugin_config.MEMORY_SEARCH_SCORE_THRESHOLD,
+        importance_weight=plugin_config.IMPORTANCE_WEIGHT,
     )
     return "🔍 搜索结果：\n" + (formatted.get("text") or "(无结果)")
 
@@ -1884,8 +1885,16 @@ async def _command_add(
             "metadata": metadata or {},
             "infer": False,
         }
-        _uid = layer_ids["user_id"] if (plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "global") else None
-        _aid = layer_ids["agent_id"] if (plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona") else None
+        _uid = (
+            layer_ids["user_id"]
+            if (plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "global")
+            else None
+        )
+        _aid = (
+            layer_ids["agent_id"]
+            if (plugin_config.ENABLE_AGENT_SCOPE or layer_ids["layer"] == "persona")
+            else None
+        )
         _rid = layer_ids["run_id"]
         if _uid is not None:
             add_kwargs["user_id"] = _uid

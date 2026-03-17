@@ -1,0 +1,22 @@
+=== 验证: 内联 _get_combined_score 定义已删除 ===
+
+grep -c 'def _get_combined_score' plugin_method.py 结果:
+0
+
+=== 验证: IMPORTANCE_WEIGHT 使用次数 ===
+
+grep -c 'IMPORTANCE_WEIGHT' plugin_method.py 结果:
+5
+
+=== IMPORTANCE_WEIGHT 使用详情 ===
+765:            item, importance_weight=plugin_config.IMPORTANCE_WEIGHT
+774:        importance_weight=plugin_config.IMPORTANCE_WEIGHT,
+1433:                item, importance_weight=config.IMPORTANCE_WEIGHT
+1844:            item, importance_weight=plugin_config.IMPORTANCE_WEIGHT
+1853:        importance_weight=plugin_config.IMPORTANCE_WEIGHT,
+
+=== 验证通过 ===
+- 3 处内联定义已删除 (计数为 0)
+- IMPORTANCE_WEIGHT 使用次数 ≥ 3 (实际为 5)
+- 第 2 处使用 config.IMPORTANCE_WEIGHT (正确)
+- 第 1、3 处使用 plugin_config.IMPORTANCE_WEIGHT (正确)

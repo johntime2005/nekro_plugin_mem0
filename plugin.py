@@ -81,7 +81,7 @@ class PluginConfig(ConfigBase):
     )
 
     MEMORY_SEARCH_SCORE_THRESHOLD: float = Field(
-        default=0.7, title="搜索分数阈值", description="记忆搜索的最低相关度分数"
+        default=0.5, title="搜索分数阈值", description="记忆搜索的最低相关度分数"
     )
     IMPORTANCE_WEIGHT: float = Field(
         default=0.3,
@@ -137,6 +137,11 @@ class PluginConfig(ConfigBase):
         title="预搜索超时（秒）",
         description="预搜索总等待时间预算；超时会保留已完成层级结果，仅在全部超时时降级",
     )
+    PRE_SEARCH_SCORE_THRESHOLD: Optional[float] = Field(
+        default=0.35,
+        title="预搜索分数阈值",
+        description="预搜索的最低组合分数阈值（None 表示使用 MEMORY_SEARCH_SCORE_THRESHOLD）。预搜索场景建议较低阈值以提高召回率",
+    )
     LEGACY_SCOPE_FALLBACK_ENABLED: bool = Field(
         default=True,
         title="启用旧作用域兼容读取",
@@ -147,7 +152,7 @@ class PluginConfig(ConfigBase):
         title="读取时自动迁移旧记忆",
         description="在兼容读取命中旧作用域时，自动复制写入当前新作用域（建议灰度开启）",
     )
-    
+
     DEDUP_ENABLED: bool = Field(
         default=True,
         title="启用去重",
@@ -163,7 +168,7 @@ class PluginConfig(ConfigBase):
         title="SimHash 预筛阈值",
         description="Hamming 距离超过此值跳过精确计算（性能优化）",
     )
-    
+
     AUTO_EXTRACT_ENABLED: bool = Field(
         default=True,
         title="启用被动提取",
@@ -179,19 +184,19 @@ class PluginConfig(ConfigBase):
         title="提取目标层级",
         description="被动提取的记忆写入哪个层级（conversation/persona/global）",
     )
-    
+
     QUERY_REWRITE_ENABLED: bool = Field(
         default=False,
         title="启用查询改写",
         description="预搜索时使用 LLM 改写查询以提升检索质量（会增加延迟）",
     )
-    
+
     MEMORY_ENGINE: str = Field(
         default="basic",
         title="记忆引擎",
         description="选择记忆检索引擎：basic（向量搜索）、hippo（知识图谱+PPR）、emgas（激活扩散）",
     )
-    
+
     HIPPO_PPR_ALPHA: float = Field(
         default=0.15,
         title="HippoRAG PPR Alpha",
@@ -212,7 +217,7 @@ class PluginConfig(ConfigBase):
         title="HippoRAG 最大候选数",
         description="通过实体获取的最大候选记忆数",
     )
-    
+
     EMGAS_DECAY_RATE: float = Field(
         default=0.01,
         title="EMGAS 衰减率",
