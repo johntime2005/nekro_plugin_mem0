@@ -33,7 +33,12 @@ class EMGASGraph:
         self.nodes: dict[str, EMGASNode] = {}
         self.edges: dict[str, dict[str, EMGASEdge]] = defaultdict(dict)
 
-    def add_node(self, node_id: str, node_type: str = "concept", source_passage_ids: set[str] | None = None) -> None:
+    def add_node(
+        self,
+        node_id: str,
+        node_type: str = "concept",
+        source_passage_ids: set[str] | None = None,
+    ) -> None:
         if node_id not in self.nodes:
             self.nodes[node_id] = EMGASNode(id=node_id, node_type=node_type)
         if source_passage_ids:
@@ -53,7 +58,9 @@ class EMGASGraph:
     def add_memory(self, content: str, passage_id: str, concepts: list[str]) -> None:
         _ = content
         passage_node_id = f"passage::{passage_id}"
-        self.add_node(passage_node_id, node_type="passage", source_passage_ids={passage_id})
+        self.add_node(
+            passage_node_id, node_type="passage", source_passage_ids={passage_id}
+        )
 
         dedup_concepts = [c for c in dict.fromkeys(concepts) if c]
         for concept in dedup_concepts:
@@ -88,7 +95,11 @@ class EMGASGraph:
             if not self.edges[from_id]:
                 del self.edges[from_id]
 
-    def retrieve_context(self, seed_concepts: list[str], options: SpreadingActivationOptions | None = None) -> set[str]:
+    def retrieve_context(
+        self,
+        seed_concepts: list[str],
+        options: SpreadingActivationOptions | None = None,
+    ) -> dict[str, float]:
         opts = options or SpreadingActivationOptions()
         activations: dict[str, float] = {node_id: 0.0 for node_id in self.nodes}
         for seed in seed_concepts:
@@ -96,7 +107,9 @@ class EMGASGraph:
                 activations[seed] = 1.0
 
         for _ in range(opts.max_iterations):
-            firing_nodes = [n for n, a in activations.items() if a > opts.firing_threshold]
+            firing_nodes = [
+                n for n, a in activations.items() if a > opts.firing_threshold
+            ]
             if not firing_nodes:
                 break
 
@@ -104,37 +117,58 @@ class EMGASGraph:
             for node_id in firing_nodes:
                 current = activations[node_id]
                 for neighbor_id, edge in self.edges.get(node_id, {}).items():
-                    propagated[neighbor_id] += current * edge.weight * opts.propagation_decay
+                    propagated[neighbor_id] += (
+                        current * edge.weight * opts.propagation_decay
+                    )
                 activations[node_id] = current * (1.0 - opts.propagation_decay)
 
             for node_id, energy in propagated.items():
                 activations[node_id] = activations.get(node_id, 0.0) + energy
 
-        ranked = sorted(activations.items(), key=lambda item: item[1], reverse=True)[: max(0, opts.top_n)]
-        result: set[str] = set()
+        ranked = sorted(activations.items(), key=lambda item: item[1], reverse=True)[
+            : max(0, opts.top_n)
+        ]
         now = datetime.now()
 
-        for node_id, score in ranked:
-            if score <= 0:
+        passage_scores: dict[str, float] = {}
+        for node_id, act_score in ranked:
+            if act_score <= 0:
                 continue
             node = self.nodes[node_id]
-            result.update(node.source_passage_ids)
+            for pid in node.source_passage_ids:
+                passage_scores[pid] = max(passage_scores.get(pid, 0.0), act_score)
             node.last_accessed = now
-            node.base_activation = max(node.base_activation, score)
+            node.base_activation = max(node.base_activation, act_score)
 
-        return result
+        if not passage_scores:
+            return {}
+        scores = list(passage_scores.values())
+        min_s, max_s = min(scores), max(scores)
+        if max_s == min_s:
+            return {pid: 1.0 for pid in passage_scores}
+        return {pid: (s - min_s) / (max_s - min_s) for pid, s in passage_scores.items()}
 
     def apply_decay(self, lambda_rate: float = 0.01) -> None:
         if lambda_rate < 0:
             raise ValueError("lambda_rate 必须 >= 0")
         for node in self.nodes.values():
-            now = datetime.now(tz=node.last_accessed.tzinfo) if node.last_accessed.tzinfo else datetime.now()
+            now = (
+                datetime.now(tz=node.last_accessed.tzinfo)
+                if node.last_accessed.tzinfo
+                else datetime.now()
+            )
             delta_seconds = (now - node.last_accessed).total_seconds()
             delta_hours = max(0.0, delta_seconds / 3600.0)
-            node.base_activation = float(node.base_activation * math.exp(-lambda_rate * delta_hours))
+            node.base_activation = float(
+                node.base_activation * math.exp(-lambda_rate * delta_hours)
+            )
 
     def prune(self, threshold: float = 0.05) -> None:
-        to_remove = {node_id for node_id, node in self.nodes.items() if node.base_activation < threshold}
+        to_remove = {
+            node_id
+            for node_id, node in self.nodes.items()
+            if node.base_activation < threshold
+        }
 
         for node_id in to_remove:
             _ = self.nodes.pop(node_id, None)
@@ -198,7 +232,8 @@ class EMGASGraph:
 
         for from_id, to_map in edges_map.items():
             graph.edges[from_id] = {
-                to_id: EMGASEdge(weight=float(weight)) for to_id, weight in to_map.items()
+                to_id: EMGASEdge(weight=float(weight))
+                for to_id, weight in to_map.items()
             }
 
         return graph

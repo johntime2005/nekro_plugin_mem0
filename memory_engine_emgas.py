@@ -20,9 +20,15 @@ class EMGASEngine(MemoryEngineBase):
 
         self.memory_id: str = str(getattr(config, "MEMORY_ID", "default") or "default")
         self.decay_rate: float = float(getattr(config, "EMGAS_DECAY_RATE", 0.01))
-        self.prune_threshold: float = float(getattr(config, "EMGAS_PRUNE_THRESHOLD", 0.05))
-        self.firing_threshold: float = float(getattr(config, "EMGAS_FIRING_THRESHOLD", 0.1))
-        self.propagation_decay: float = float(getattr(config, "EMGAS_PROPAGATION_DECAY", 0.85))
+        self.prune_threshold: float = float(
+            getattr(config, "EMGAS_PRUNE_THRESHOLD", 0.05)
+        )
+        self.firing_threshold: float = float(
+            getattr(config, "EMGAS_FIRING_THRESHOLD", 0.1)
+        )
+        self.propagation_decay: float = float(
+            getattr(config, "EMGAS_PROPAGATION_DECAY", 0.85)
+        )
 
         self.graph_path: Path = (
             Path("data")
@@ -57,7 +63,9 @@ class EMGASEngine(MemoryEngineBase):
             return
 
         with self._lock:
-            self.graph.add_memory(content=content, passage_id=passage_id, concepts=concepts)
+            self.graph.add_memory(
+                content=content, passage_id=passage_id, concepts=concepts
+            )
             self.passage_store[passage_id] = payload
             self._apply_ppmi()
             self._save_graph()
@@ -77,19 +85,28 @@ class EMGASEngine(MemoryEngineBase):
         )
 
         with self._lock:
-            passage_ids = self.graph.retrieve_context(seed_concepts=seed_concepts, options=opts)
+            passage_ids = self.graph.retrieve_context(
+                seed_concepts=seed_concepts, options=opts
+            )
             if not passage_ids:
                 return []
 
             results: list[dict[str, object]] = []
-            for passage_id in passage_ids:
+            for passage_id, activation_score in passage_ids.items():
                 payload = self.passage_store.get(passage_id)
                 if payload:
                     result = dict(payload)
                     _ = result.setdefault("id", passage_id)
+                    result["score"] = activation_score
                     results.append(result)
                 else:
-                    results.append({"id": passage_id, "memory": passage_id})
+                    results.append(
+                        {
+                            "id": passage_id,
+                            "memory": passage_id,
+                            "score": activation_score,
+                        }
+                    )
             return results
 
     @override
@@ -99,7 +116,10 @@ class EMGASEngine(MemoryEngineBase):
             return False
 
         with self._lock:
-            existed = passage_id in self.passage_store or f"passage::{passage_id}" in self.graph.nodes
+            existed = (
+                passage_id in self.passage_store
+                or f"passage::{passage_id}" in self.graph.nodes
+            )
             self.graph.remove_memory(passage_id)
             _ = self.passage_store.pop(passage_id, None)
             self._apply_ppmi()
@@ -144,7 +164,9 @@ class EMGASEngine(MemoryEngineBase):
             for raw_key, raw_value in value_map.items():
                 if isinstance(raw_key, str):
                     payload[raw_key] = raw_value
-            passage_id = str(payload.get("id") or payload.get("passage_id") or key or "").strip()
+            passage_id = str(
+                payload.get("id") or payload.get("passage_id") or key or ""
+            ).strip()
             content = str(payload.get("memory") or payload.get("content") or "").strip()
             raw_concepts = payload.get("concepts")
             concepts = self._normalize_concepts(raw_concepts)

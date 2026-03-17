@@ -6,9 +6,23 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
+def _coerce_result_item(item: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(item, dict):
+        return item
+    if isinstance(item, str):
+        text = item.strip()
+        if text:
+            return {"memory": text}
+    return None
+
+
 def format_add_output(result: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(result, dict) and "results" in result:
-        return {"ok": True, "results": result.get("results", []), "relations": result.get("relations")}
+        return {
+            "ok": True,
+            "results": result.get("results", []),
+            "relations": result.get("relations"),
+        }
     return result
 
 
@@ -32,18 +46,32 @@ def _filter_expired(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return valid
 
 
-def _normalize_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _normalize_results(results: Any) -> List[Dict[str, Any]]:
+    raw_items: Any
     if isinstance(results, dict):
-        return results.get("results", [])
-    return results or []
+        raw_items = results.get("results", [])
+    else:
+        raw_items = results or []
+
+    if not isinstance(raw_items, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in raw_items:
+        coerced = _coerce_result_item(item)
+        if coerced is not None:
+            normalized.append(coerced)
+    return normalized
 
 
-def normalize_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def normalize_results(results: Any) -> List[Dict[str, Any]]:
     """公开的结果归一化，供外部复用。"""
     return _normalize_results(results)
 
 
-def _filter_by_tags(results: List[Dict[str, Any]], tags: List[str]) -> List[Dict[str, Any]]:
+def _filter_by_tags(
+    results: List[Dict[str, Any]], tags: List[str]
+) -> List[Dict[str, Any]]:
     if not tags:
         return results
     wanted = set(tags)
@@ -89,32 +117,50 @@ def _format_memory_list(results: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _get_combined_score(item: Dict[str, Any]) -> float:
-    """计算组合分数：0.7 * score + 0.3 * (importance / 10)"""
+def _get_combined_score(item: Dict[str, Any], importance_weight: float = 0.3) -> float:
+    """计算组合分数：(1-weight)*score + weight*(importance/10)
+
+    Args:
+        item: 记忆条目
+        importance_weight: importance 权重 (0.0-1.0)，剩余为 score 权重
+    """
     score = item.get("score") or 0.0
     if not isinstance(score, (int, float)):
         score = 0.0
-    
+
     metadata = item.get("metadata") or {}
     importance = metadata.get("importance", 5)
     try:
         importance = max(1, min(10, int(importance)))
     except (ValueError, TypeError):
         importance = 5
-    
-    return 0.7 * float(score) + 0.3 * (importance / 10.0)
+
+    w = max(0.0, min(1.0, float(importance_weight)))
+    return (1.0 - w) * float(score) + w * (importance / 10.0)
 
 
-def format_search_output(results: List[Dict[str, Any]], tags: Optional[List[str]] = None, threshold: Optional[float] = None) -> Dict[str, Any]:
+def format_search_output(
+    results: List[Dict[str, Any]],
+    tags: Optional[List[str]] = None,
+    threshold: Optional[float] = None,
+    importance_weight: float = 0.3,
+) -> Dict[str, Any]:
     normalized = _normalize_results(results)
     filtered = _filter_by_tags(normalized, tags or [])
     filtered = _filter_expired(filtered)
     if threshold is not None:
-        filtered = [item for item in filtered if _get_combined_score(item) >= threshold]
+        filtered = [
+            item
+            for item in filtered
+            if _get_combined_score(item, importance_weight=importance_weight)
+            >= threshold
+        ]
     return {"results": filtered, "text": _format_memory_list(filtered)}
 
 
-def format_get_all_output(results: List[Dict[str, Any]], tags: Optional[List[str]] = None) -> Dict[str, Any]:
+def format_get_all_output(
+    results: List[Dict[str, Any]], tags: Optional[List[str]] = None
+) -> Dict[str, Any]:
     normalized = _normalize_results(results)
     filtered = _filter_by_tags(normalized, tags or [])
     filtered = _filter_expired(filtered)
