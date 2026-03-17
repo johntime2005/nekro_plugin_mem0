@@ -566,6 +566,20 @@ async def add_memory(
     scope_level: Optional[str] = None,
     guild_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """添加记忆到指定层级（非阻塞，立即返回）。
+
+    scope_level 可选值：conversation / persona / global / guild
+    - conversation：仅当前会话有效，用 run_id 隔离
+    - persona：绑定人设，跨会话共享，用 agent_id 隔离
+    - global：属于用户本人，跨人设跨会话，用 user_id 隔离
+    - guild：群组共享记忆，用 guild_id 隔离
+
+    通常只需传 memory 和 scope_level，框架自动从上下文推断 user_id/agent_id/run_id。
+
+    示例：
+        await add_memory(_ctx, '喜欢科幻电影', scope_level='persona')
+        await add_memory(_ctx, '用户真实姓名：张三', scope_level='global')
+    """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
     if client is None:
@@ -681,6 +695,14 @@ async def search_memory(
     limit: int = 5,
     guild_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """通过语义检索搜索记忆（阻塞直到返回结果）。
+
+    仅用于具体语义查询（如"我喜欢什么""之前说过XX吗"）。
+    不要用于全量枚举（应使用 get_all_memory）。
+
+    示例：
+        result = await search_memory(_ctx, '和主人的记忆', layers=['persona', 'global'], limit=20)
+    """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
     if client is None:
@@ -1008,7 +1030,14 @@ async def memory_command(
     示例：
         memory_command('search', {'query': '最喜欢的颜色', 'layers': ['global']})
     """
-    payload = payload or {}
+    if isinstance(payload, str):
+        import json as _json
+        try:
+            payload = _json.loads(payload)
+        except (ValueError, TypeError):
+            payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
     action = (action or "").lower()
 
     if action == "add":
