@@ -531,9 +531,8 @@ async def init_plugin() -> None:
     SandboxMethodType.BEHAVIOR,
     name="添加记忆",
     description=(
-        "为用户的个人资料添加一条新记忆。"
-        "非阻塞，立即返回，可与 send_text 写在同一代码块。"
-        "调用示例：await add_memory('用户喜欢猫', scope_level='global')"
+        "添加记忆（非阻塞）。"
+        "示例：add_memory('用户喜欢猫', scope_level='global')"
     ),
 )
 async def add_memory(
@@ -546,37 +545,18 @@ async def add_memory(
     scope_level: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    添加记忆到指定的记忆层级（非阻塞，立即返回）。
+    添加记忆到指定层级（非阻塞，立即返回）。
 
-    调用约定：
-    - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
-    - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
+    scope_level 可选值：conversation / persona / global
+    - conversation：仅当前会话有效，用 run_id 隔离
+    - persona：绑定人设，跨会话共享，用 agent_id 隔离
+    - global：属于用户本人，跨人设跨会话，用 user_id 隔离
 
-    此函数会立即返回成功状态，实际的向量数据库写入在后台异步完成，不会阻塞后续代码执行。
-    因此可以安全地与 send_text 等消息发送函数写在同一个代码块中。
-
-    ⚠️ 重要：三层记忆模型的隔离标识符
-    - conversation 层：使用 run_id（会话ID），记忆仅在当前会话内有效
-    - persona 层：使用 agent_id（人设ID），记忆与特定人设绑定，在该人设的所有会话间共享
-    - global 层：使用 user_id（用户ID），记忆跨人设和会话，属于用户本人
-
-    参数说明：
-        memory: 要添加的记忆内容（字符串或字典）
-        user_id: 用户ID（仅在 global 层有效）
-        agent_id: 人设/助理ID（仅在 persona 层有效）
-        run_id: 会话ID（仅在 conversation 层有效）
-        scope_level: 目标层级，可选值：conversation/persona/global
-        metadata: 可选的元数据，如 {"TYPE": "PREFERENCES", "category": "hobby"}
+    通常只需传 memory 和 scope_level，框架自动从上下文推断 user_id/agent_id/run_id。
 
     示例：
-        # 添加人设级记忆（跨会话共享）
-        await add_memory(_ctx, "喜欢科幻电影", agent_id="persona_001", scope_level="persona")
-
-        # 添加用户级记忆（跨人设共享）
-        await add_memory(_ctx, "用户真实姓名：张三", user_id="user-123", scope_level="global")
-
-        # 添加会话级记忆（仅当前对话）
-        await add_memory(_ctx, "当前讨论主题：量子物理", run_id="chat-456", scope_level="conversation")
+        await add_memory('喜欢科幻电影', scope_level='persona')
+        await add_memory('用户真实姓名：张三', scope_level='global')
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -637,10 +617,8 @@ async def add_memory(
     SandboxMethodType.AGENT,
     name="搜索记忆",
     description=(
-        "根据查询语句搜索用户记忆。"
-        "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
-        "调用示例：await search_memory('查询词') 或 await search_memory('查询词', layers=['global'])"
-        "【注意】如果返回内容过长导致截断（如遇到 view_str_content 截断提示），请缩小 limit 行范围或自行提取概要内容避免全文打印。"
+        "语义搜索记忆（阻塞，等待结果）。"
+        "示例：search_memory('查询词', layers=['global'])"
     ),
 )
 async def search_memory(
@@ -654,46 +632,19 @@ async def search_memory(
     limit: int = 5,
 ) -> Dict[str, Any]:
     """
-    按层级搜索记忆，支持多层级聚合搜索。
+    语义搜索记忆（阻塞，等待结果）。
 
-    语义边界（非常重要）：
-    - search_memory 是“语义检索”，适合“我喜欢什么/之前提过XX吗”这类具体查询。
-    - 若目的是“列出全部记忆/所有记忆”，请使用 get_all_memory，而不是 search_memory。
-      使用“所有记忆/全部记忆”等泛化 query 进行语义检索，可能因相似度机制返回空结果。
+    适用场景：具体查询（"我喜欢什么"、"之前提过XX吗"）
+    不适用：列出全部记忆（请用 get_all_memory）
 
-    调用约定：
-    - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
-    - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
-
-    ⚠️ 重要：层级搜索的隔离标识符
-    - 搜索 conversation 层：需要提供 run_id（会话ID）
-    - 搜索 persona 层：需要提供 agent_id（人设ID）
-    - 搜索 global 层：需要提供 user_id（用户ID）
-    - 多层搜索：提供对应层级所需的所有标识符，结果会按相关度排序去重
-
-    💡 截断处理提示：若是使用时遇到 view_str_content 返回内容被截断（提示缩减 max_len），请减少 limit 参数，或者不要直接打印完整结果字典，而是提取并打印必要的精简字段。
-
-    参数说明：
-        query: 搜索查询文本（支持语义搜索）
-        user_id: 用户ID（用于搜索 global 层）
-        agent_id: 人设ID（用于搜索 persona 层）
-        run_id: 会话ID（用于搜索 conversation 层）
-        scope_level: 单一层级搜索，可选值：conversation/persona/global
-        layers: 多层级搜索列表，如 ["persona", "global"]
-        limit: 返回结果数量上限
+    layers 可选值：['conversation', 'persona', 'global']
+    - conversation：需要 run_id
+    - persona：需要 agent_id
+    - global：需要 user_id
 
     示例：
-        # 在人设层级搜索（需要 agent_id）
-        await search_memory(_ctx, "喜欢什么", agent_id="persona_001", layers=["persona"])
-
-        # 跨多个层级搜索（需要对应的标识符）
-        await search_memory(_ctx, "偏好", agent_id="persona_001", user_id="user-123", layers=["persona", "global"], limit=8)
-
-        # 单层搜索（自动使用上下文中的标识符）
-        await search_memory(_ctx, "历史记录", scope_level="conversation")
-
-        # 列出全部记忆（请改用 get_all_memory）
-        await get_all_memory(_ctx, agent_id="persona_001", user_id="user-123", layers=["persona", "global"])
+        search_memory('喜欢什么', layers=['persona'])
+        search_memory('偏好', layers=['persona', 'global'], limit=8)
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -753,10 +704,8 @@ async def search_memory(
     SandboxMethodType.AGENT,
     name="获取记忆列表",
     description=(
-        "获取指定作用域（user/agent/run）的全部记忆，可按标签过滤。"
-        "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
-        "调用示例：await get_all_memory() 或 await get_all_memory(layers=['global'])"
-        "【注意】当记忆条目过多时可能被截断（如遇到 view_str_content 截断提示），建议按 tags 过滤，或自行提取概要字段避免直接全量打印字典。"
+        "列出全部记忆（阻塞，等待结果）。"
+        "示例：get_all_memory(layers=['global'], tags=['FACTS'])"
     ),
 )
 async def get_all_memory(
@@ -769,40 +718,14 @@ async def get_all_memory(
     tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    获取指定层级的全部记忆，支持标签过滤。
+    列出全部记忆（阻塞，等待结果）。
 
-    调用约定：
-    - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
-    - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
-
-    ⚠️ 重要：层级获取的隔离标识符
-    - 获取 conversation 层：需要提供 run_id（会话ID）
-    - 获取 persona 层：需要提供 agent_id（人设ID）- ⚠️ 常见错误：不要用 user_id！
-    - 获取 global 层：需要提供 user_id（用户ID）
-    - 多层获取：提供对应层级所需的所有标识符
-
-    💡 截断处理提示：若是遇到 view_str_content 返回内容被截断（提示缩减 max_len），建议根据 tags 过滤缩小范围，或者在代码中循环获取概要字段，不要直接打印完整结果。
-
-    参数说明：
-        user_id: 用户ID（仅用于获取 global 层记忆）
-        agent_id: 人设ID（仅用于获取 persona 层记忆）
-        run_id: 会话ID（仅用于获取 conversation 层记忆）
-        scope_level: 单一层级，可选值：conversation/persona/global
-        layers: 多层级列表，如 ["persona", "global"]
-        tags: 标签过滤器，如 ["PREFERENCES", "FACTS"]
+    layers 可选值：['conversation', 'persona', 'global']
+    tags 可选值：['FACTS', 'PREFERENCES', 'GOALS', 'TRAITS', 'RELATIONSHIPS', 'EVENTS', 'TOPICS']
 
     示例：
-        # ❌ 错误：使用 user_id 获取 persona 层（会返回空）
-        await get_all_memory(_ctx, user_id="user-123", layers=["persona"])
-
-        # ✅ 正确：使用 agent_id 获取 persona 层
-        await get_all_memory(_ctx, agent_id="persona_001", layers=["persona"])
-
-        # ✅ 正确：获取用户的全局记忆
-        await get_all_memory(_ctx, user_id="user-123", layers=["global"])
-
-        # ✅ 正确：跨层级获取（需要对应标识符）
-        await get_all_memory(_ctx, agent_id="persona_001", user_id="user-123", layers=["persona", "global"], tags=["PREFERENCES"])
+        get_all_memory(layers=['persona'])
+        get_all_memory(layers=['persona', 'global'], tags=['PREFERENCES'])
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -850,9 +773,8 @@ async def get_all_memory(
     SandboxMethodType.BEHAVIOR,
     name="更新记忆",
     description=(
-        "根据记忆ID更新记忆内容。"
-        "此操作为非阻塞操作，调用后立即返回，实际更新在后台完成，可以和发送消息写在同一个代码块中。"
-        "调用示例：await update_memory(memory_id, '新内容')"
+        "更新记忆内容（非阻塞）。"
+        "示例：update_memory(memory_id, '新内容')"
     ),
 )
 async def update_memory(
@@ -861,23 +783,12 @@ async def update_memory(
     new_memory: str,
 ) -> Dict[str, Any]:
     """
-    更新指定记忆内容（跨所有层级通用，非阻塞，立即返回）。
+    更新记忆内容（非阻塞，立即返回）。
 
-    调用约定：
-    - 沙盒内：首参传运行时注入的 _ctx。
-    - 沙盒外独立脚本：首参传 None（避免直接写 _ctx 导致 NameError）。
-
-    此函数会立即返回成功状态，实际的向量数据库更新在后台异步完成，不会阻塞后续代码执行。
-
-    注意：memory_id 是全局唯一的，更新操作不需要指定层级或标识符。
-
-    参数说明：
-        memory_id: 记忆的唯一ID（可从 search_memory 或 get_all_memory 结果中获取）
-        new_memory: 新的记忆内容
+    memory_id 全局唯一，无需指定层级。
 
     示例：
-        await update_memory(_ctx, memory_id="abc123", new_memory="改为喜欢爵士乐")
-        await update_memory(None, memory_id="abc123", new_memory="改为喜欢爵士乐")
+        update_memory(memory_id="abc123", new_memory="改为喜欢爵士乐")
     """
     client = await get_mem0_client()
     if client is None:
@@ -892,10 +803,8 @@ async def update_memory(
     SandboxMethodType.BEHAVIOR,
     name="删除记忆",
     description=(
-        "根据记忆ID删除单条记忆。当发现记忆内容已过时、不准确或与当前事实矛盾时，应主动调用此方法清理。"
-        "例如：用户更正了之前的信息、用户偏好发生变化、记忆内容与新获取的信息冲突等情况。"
-        "此操作为非阻塞操作，调用后立即返回，实际删除在后台完成，可以和发送消息写在同一个代码块中。"
-        "调用示例：await delete_memory(memory_id)"
+        "删除单条记忆（非阻塞）。主动清理过时/矛盾的记忆。"
+        "示例：delete_memory(memory_id)"
     ),
 )
 async def delete_memory(
@@ -903,30 +812,15 @@ async def delete_memory(
     memory_id: str,
 ) -> Dict[str, Any]:
     """
-    删除单条记忆（跨所有层级通用，非阻塞，立即返回）。
+    删除单条记忆（非阻塞，立即返回）。
 
-    调用约定：
-    - 沙盒内：首参传运行时注入的 _ctx。
-    - 沙盒外独立脚本：首参传 None（避免直接写 _ctx 导致 NameError）。
-
-    此函数会立即返回成功状态，实际的向量数据库删除在后台异步完成，不会阻塞后续代码执行。
-
-    💡 记忆清理最佳实践：
-    你应该主动清理过时的记忆，以保持记忆库的准确性。以下情况应删除旧记忆：
-    - 用户主动更正了之前的信息（如"我其实不喜欢XX"→删除之前"喜欢XX"的记忆）
-    - 用户偏好/状态发生变化（如换了工作、搬了家→删除旧的工作/地址记忆）
-    - 记忆内容与新信息矛盾（保留最新的，删除过时的）
-    - 临时性信息已过期（如"明天要开会"→会议结束后可清理）
-    建议在添加新记忆前，先搜索是否存在相关的旧记忆，如有矛盾则先删除旧记忆再添加新记忆。
-
-    注意：memory_id 是全局唯一的，删除操作不需要指定层级或标识符。
-
-    参数说明：
-        memory_id: 记忆的唯一ID（可从 search_memory 或 get_all_memory 结果中获取）
+    主动清理过时记忆的场景：
+    - 用户更正信息（"我其实不喜欢XX" → 删除旧记忆）
+    - 偏好变化（换工作、搬家 → 删除旧地址/工作）
+    - 信息矛盾（保留最新，删除过时）
 
     示例：
-        await delete_memory(_ctx, memory_id="abc123")
-        await delete_memory(None, memory_id="abc123")
+        delete_memory(memory_id="abc123")
     """
     client = await get_mem0_client()
     if client is None:
@@ -941,9 +835,8 @@ async def delete_memory(
     SandboxMethodType.BEHAVIOR,
     name="删除作用域记忆",
     description=(
-        "删除指定 user/agent/run 对应的全部记忆（危险操作，请谨慎使用）。"
-        "此操作为非阻塞操作，调用后立即返回，实际删除在后台完成，可以和发送消息写在同一个代码块中。"
-        "调用示例：await delete_all_memory(layers=['global'])"
+        "批量删除记忆（非阻塞，危险操作）。"
+        "示例：delete_all_memory(layers=['global'])"
     ),
 )
 async def delete_all_memory(
@@ -955,36 +848,11 @@ async def delete_all_memory(
     layers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    按层级批量删除记忆（危险操作，请谨慎使用。非阻塞，立即返回）。
-
-    调用约定：
-    - 沙盒内：必须传入运行时注入的 _ctx（第一个参数）。
-    - 沙盒外独立脚本：若无 AgentCtx，可传 None，但需显式提供 user_id/agent_id/run_id 中至少一个。
-
-    此函数会立即返回成功状态，实际的向量数据库删除在后台异步完成，不会阻塞后续代码执行。
-
-    ⚠️ 重要：层级删除的隔离标识符
-    - 删除 conversation 层：需要提供 run_id（会话ID）
-    - 删除 persona 层：需要提供 agent_id（人设ID）
-    - 删除 global 层：需要提供 user_id（用户ID）
-    - 多层删除：提供对应层级所需的所有标识符
-
-    参数说明：
-        user_id: 用户ID（用于删除 global 层记忆）
-        agent_id: 人设ID（用于删除 persona 层记忆）
-        run_id: 会话ID（用于删除 conversation 层记忆）
-        scope_level: 单一层级，可选值：conversation/persona/global
-        layers: 多层级列表，如 ["persona", "global"]
+    批量删除记忆（非阻塞，危险操作）。
 
     示例：
-        # 删除特定人设的所有记忆
-        await delete_all_memory(_ctx, agent_id="persona_001", layers=["persona"])
-
-        # 删除用户的全局记忆
-        await delete_all_memory(_ctx, user_id="user-123", layers=["global"])
-
-        # 清空多个层级
-        await delete_all_memory(_ctx, agent_id="persona_001", user_id="user-123", layers=["persona", "global"])
+        delete_all_memory(layers=['persona'])
+        delete_all_memory(layers=['persona', 'global'])
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -1037,10 +905,8 @@ async def delete_all_memory(
     SandboxMethodType.AGENT,
     name="获取记忆历史",
     description=(
-        "查看指定记忆的历史版本。"
-        "此操作会自动中断当前 Agent 的生成，等待向量数据库返回结果后，继续生成后续内容。"
-        "调用示例：await get_memory_history(memory_id)"
-        "【注意】如果历史内容过长导致截断（如遇到 view_str_content 截断提示），请自行提取结果概要避免全文打印字典。"
+        "查看记忆历史版本（阻塞，等待结果）。"
+        "示例：get_memory_history(memory_id)"
     ),
 )
 async def get_memory_history(
@@ -1048,21 +914,10 @@ async def get_memory_history(
     memory_id: str,
 ) -> Dict[str, Any]:
     """
-    查看指定记忆的历史版本（跨所有层级通用）。
-
-    调用约定：
-    - 沙盒内：首参传运行时注入的 _ctx。
-    - 沙盒外独立脚本：首参传 None（避免直接写 _ctx 导致 NameError）。
-
-    💡 截断处理提示：若是遇到 view_str_content 返回内容被截断（提示缩减 max_len），请勿直接打印完整结果字典，而是提取必要的精简字段。
-
-    注意：memory_id 是全局唯一的，查询历史不需要指定层级或标识符。
-
-    参数说明：
-        memory_id: 记忆的唯一ID（可从 search_memory 或 get_all_memory 结果中获取）
+    查看记忆历史版本（阻塞，等待结果）。
 
     示例：
-        await get_memory_history(_ctx, memory_id="abc123")
+        get_memory_history(memory_id="abc123")
     """
     client = await get_mem0_client()
     if client is None:
@@ -1086,8 +941,8 @@ async def get_memory_history(
     SandboxMethodType.BEHAVIOR,
     name="记忆指令面板",
     description=(
-        "提供命令式入口，便于在后台/网页操作：支持 add/search/list/update/delete/delete_all/history。"
-        "调用示例：await memory_command('search', {'query': '查询词'})"
+        "统一命令入口（支持 add/search/list/update/delete/delete_all/history）。"
+        "示例：memory_command('search', {'query': '查询词'})"
     ),
 )
 async def memory_command(
@@ -1096,14 +951,10 @@ async def memory_command(
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    统一命令入口，便于上层做网页/后台交互调用。
-
-    调用约定：
-    - 沙盒内：首参传运行时注入的 _ctx。
-    - 沙盒外独立脚本：首参传 None；并在 payload 中显式给出 user_id/agent_id/run_id 以确保作用域可解析。
+    统一命令入口（支持 add/search/list/update/delete/delete_all/history）。
 
     示例：
-        await memory_command(_ctx, "search", {"query": "最喜欢的颜色", "user_id": "user-1"})
+        memory_command('search', {'query': '最喜欢的颜色', 'layers': ['global']})
     """
     payload = payload or {}
     action = (action or "").lower()
@@ -1531,8 +1382,10 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "# 长期记忆插件",
         f"可用层级: {available_layers} | 阈值: {config.MEMORY_SEARCH_SCORE_THRESHOLD}",
         "",
-        "## 调用规则（重要）",
-        "直接调用方法名，不需要传 _ctx 参数，框架自动注入。",
+        "## ⚠️ 调用规则（必读）",
+        "所有记忆函数的第一个参数 _ctx 由框架自动注入，调用时必须省略！",
+        "❌ 错误：add_memory(_ctx, '内容')  # 会导致 NameError",
+        "✅ 正确：add_memory('内容', scope_level='global')",
         "",
         "## 写操作（非阻塞，可与 send_text 同一代码块）",
         "await add_memory(‘用户喜欢猫’, scope_level=’global’)",
