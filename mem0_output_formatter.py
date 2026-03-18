@@ -117,6 +117,44 @@ def _format_memory_list(results: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _build_memory_operations(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    operations: List[Dict[str, Any]] = []
+    for item in results:
+        memory_id = item.get("id") or item.get("memory_id")
+        if not memory_id:
+            continue
+        metadata = item.get("metadata") or {}
+        memory_text = (
+            item.get("memory") or item.get("data") or item.get("content") or ""
+        )
+        operations.append(
+            {
+                "memory_id": str(memory_id),
+                "update": {
+                    "tool": "update_memory",
+                    "payload": {
+                        "memory_id": str(memory_id),
+                        "new_memory": str(memory_text),
+                    },
+                },
+                "delete": {
+                    "tool": "delete_memory",
+                    "payload": {"memory_id": str(memory_id)},
+                },
+                "update_metadata": {
+                    "tool": "update_memory_metadata",
+                    "payload": {
+                        "memory_id": str(memory_id),
+                        "metadata_patch": {},
+                        "expiration_date": metadata.get("expiration_date"),
+                        "clear_expiration": False,
+                    },
+                },
+            }
+        )
+    return operations
+
+
 def _get_combined_score(item: Dict[str, Any], importance_weight: float = 0.3) -> float:
     """计算组合分数：(1-weight)*score + weight*(importance/10)
 
@@ -155,7 +193,11 @@ def format_search_output(
             if _get_combined_score(item, importance_weight=importance_weight)
             >= threshold
         ]
-    return {"results": filtered, "text": _format_memory_list(filtered)}
+    return {
+        "results": filtered,
+        "text": _format_memory_list(filtered),
+        "memory_operations": _build_memory_operations(filtered),
+    }
 
 
 def format_get_all_output(
@@ -164,7 +206,11 @@ def format_get_all_output(
     normalized = _normalize_results(results)
     filtered = _filter_by_tags(normalized, tags or [])
     filtered = _filter_expired(filtered)
-    return {"results": filtered, "text": _format_memory_list(filtered)}
+    return {
+        "results": filtered,
+        "text": _format_memory_list(filtered),
+        "memory_operations": _build_memory_operations(filtered),
+    }
 
 
 def format_history_output(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

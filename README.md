@@ -136,19 +136,26 @@ class MemoryConfig(ConfigBase):
 
 Agent 可以通过以下函数来操作记忆库：
 
-- `add_memory(ctx_or_none, memory, user_id=None, metadata=None, agent_id=None, run_id=None, scope_level=None)`
+- `add_memory(ctx_or_none, memory, user_id=None, metadata=None, expiration_date=None, agent_id=None, run_id=None, scope_level=None)`
   - **描述**: 添加一条记忆（非阻塞，立即返回；后台异步写入）。
+  - **补充**: 可直接传 `expiration_date`（ISO8601）让模型在写入时设置过期时间。
 
 - `search_memory(ctx_or_none, query, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, limit=5)`
   - **描述**: 通过语义检索搜索记忆（阻塞直到返回结果）。
   - **边界**: 仅用于“具体语义查询”（如“我喜欢什么”“之前说过XX吗”）。
   - **不要用于**: “列出所有记忆/全部记忆”这类全量枚举诉求（应使用 `get_all_memory`）。
+  - **返回补充**: 结果包含 `memory_operations`，提供 `update / update_metadata / delete` 的可调用模板（含 `memory_id`）。
 
 - `get_all_memory(ctx_or_none, user_id=None, agent_id=None, run_id=None, scope_level=None, layers=None, tags=None)`
   - **描述**: 获取指定层级的全部记忆，可按标签过滤。
+  - **返回补充**: 同样包含 `memory_operations`，便于模型对单条记忆做后续维护。
 
 - `update_memory(ctx_or_none, memory_id, new_memory)`
   - **描述**: 更新指定记忆内容（非阻塞，后台异步更新）。
+
+- `update_memory_metadata(ctx_or_none, memory_id, metadata_patch=None, expiration_date=None, clear_expiration=False)`
+  - **描述**: 仅更新指定记忆元数据（非阻塞，后台异步更新）。
+  - **典型用途**: 调整 `TYPE/importance`、设置或清除 `expiration_date`，不改正文内容。
 
 - `delete_memory(ctx_or_none, memory_id)`
   - **描述**: 删除单条记忆（非阻塞，后台异步删除）。
@@ -190,7 +197,7 @@ result = await search_memory(None, "和主人的记忆", agent_id="xinger", user
 - `mem clear [layer=conversation|persona|global]`：按层级清空（不填 layer 按默认顺序）。
 - `mem history <memory_id>`：查看指定记忆的历史版本。
 - `mem search <query> [layer=xxx] [limit=5]`：语义搜索并展示结果。
-- `mem add <文本> [layer=conversation|persona|global] [tag=TYPE] [meta.xxx=val]`：写入记忆，支持标签与自定义元数据。
+- `mem add <文本> [layer=conversation|persona|global] [tag=TYPE] [expires=ISO8601] [meta.xxx=val]`：写入记忆，支持标签、过期时间与自定义元数据。
 
 可选参数：
 `user=xxx agent=xxx run=xxx layer=xxx tag=TYPE meta.xxx=val`

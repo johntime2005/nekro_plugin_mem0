@@ -3,6 +3,7 @@
 """
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Annotated, Any, Dict, List, Optional, Set, Tuple
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core import logger
@@ -183,6 +184,19 @@ def _normalize_cli_value(value: Optional[str]) -> Optional[str]:
     return value or None
 
 
+def _normalize_bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    normalized = str(value).strip().lower()
+    return normalized in {"1", "true", "yes", "y", "on"}
+
+
+def _extract_memory_text(item: Dict[str, Any]) -> str:
+    return str(item.get("memory") or item.get("data") or item.get("content") or "")
+
+
 def _split_tokens(tokens: List[str]) -> Tuple[List[str], Dict[str, str]]:
     positional: List[str] = []
     kv: Dict[str, str] = {}
@@ -222,6 +236,18 @@ def _parse_metadata(options: Dict[str, str]) -> Dict[str, Any]:
     tag = options.get("tag") or options.get("type")
     if tag:
         metadata["TYPE"] = tag
+
+    expiration_date = (
+        options.get("expiration_date")
+        or options.get("expires")
+        or options.get("expire")
+        or options.get("expires_at")
+        or options.get("expiry")
+    )
+    expiration_date = _normalize_cli_value(expiration_date)
+    if expiration_date:
+        metadata["expiration_date"] = expiration_date
+
     for key, val in options.items():
         if key.startswith("meta.") or key.startswith("meta_"):
             meta_key = key.split(".", 1)[1] if "." in key else key.split("_", 1)[1]
@@ -463,6 +489,7 @@ async def _read_with_legacy_fallback(
 
     merged = normalize_results(primary_raw)
     has_primary = bool(merged)
+    primary_count = len(merged)
     seen_ids: Set[str] = set()
     for item in merged:
         memory_id = _memory_identifier(item)
@@ -470,6 +497,8 @@ async def _read_with_legacy_fallback(
             seen_ids.add(memory_id)
 
     legacy_hit = False
+    legacy_variants_hit = 0
+    legacy_records_merged = 0
     if not getattr(plugin_config, "LEGACY_SCOPE_FALLBACK_ENABLED", True):
         return merged, legacy_hit
 
@@ -499,6 +528,7 @@ async def _read_with_legacy_fallback(
             continue
 
         legacy_hit = True
+        legacy_variants_hit += 1
         for record in legacy_records:
             memory_id = _memory_identifier(record)
             if memory_id and memory_id in seen_ids:
@@ -506,15 +536,27 @@ async def _read_with_legacy_fallback(
             if memory_id:
                 seen_ids.add(memory_id)
             merged.append(record)
+            legacy_records_merged += 1
 
         # 自动迁移采用保守策略：仅当新作用域当前为空时，才把旧作用域结果复制到新作用域
         if allow_auto_migrate and (not has_primary) and legacy_records:
+            logger.info(
+                f"[Memory] 触发自动迁移排队：layer={layer_ids.get('layer')}, "
+                f"legacy_records={len(legacy_records)}"
+            )
             _schedule_migration_once(
                 client=client,
                 legacy_records=legacy_records,
                 target_layer_ids=layer_ids,
                 plugin_config=plugin_config,
             )
+
+    if legacy_hit:
+        logger.debug(
+            f"[Memory] 兼容读取统计：layer={layer_ids.get('layer')}, "
+            f"primary={primary_count}, legacy_variants_hit={legacy_variants_hit}, "
+            f"legacy_merged={legacy_records_merged}, total={len(merged)}"
+        )
 
     return merged, legacy_hit
 
@@ -523,16 +565,88 @@ def _format_command_error(message: str) -> str:
     return f"❌ {message}"
 
 
+def _parse_expiration_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 async def _cleanup_expired_memories() -> None:
     try:
-        from datetime import datetime, timezone
-
         client = await get_mem0_client()
         if client is None:
             return
-        now_str = datetime.now(timezone.utc).isoformat()
-        logger.info(f"[ExpiryCleanup] 开始清理过期记忆 ({now_str})")
-        logger.debug("[ExpiryCleanup] 完成")
+
+        now = datetime.now(timezone.utc)
+        logger.info(f"[ExpiryCleanup] 开始清理过期记忆 ({now.isoformat()})")
+
+        try:
+            all_results_raw = await asyncio.to_thread(client.get_all)
+        except Exception as exc:
+            logger.warning(f"[ExpiryCleanup] 拉取全量记忆失败，跳过本轮: {exc}")
+            return
+
+        all_records = normalize_results(all_results_raw)
+        if not all_records:
+            logger.debug("[ExpiryCleanup] 当前无可清理记忆")
+            return
+
+        expired_ids: List[str] = []
+        invalid_expiration = 0
+
+        for item in all_records:
+            metadata = item.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            expiration_raw = metadata.get("expiration_date")
+            if not expiration_raw:
+                continue
+
+            expiration_dt = _parse_expiration_datetime(expiration_raw)
+            if expiration_dt is None:
+                invalid_expiration += 1
+                continue
+
+            if expiration_dt > now:
+                continue
+
+            memory_id = _memory_identifier(item)
+            if memory_id:
+                expired_ids.append(memory_id)
+
+        if not expired_ids:
+            logger.info(
+                f"[ExpiryCleanup] 未发现过期记忆，scanned={len(all_records)}, invalid_expiration={invalid_expiration}"
+            )
+            return
+
+        deleted = 0
+        failed = 0
+        for memory_id in expired_ids:
+            try:
+                await asyncio.to_thread(client.delete, memory_id)
+                deleted += 1
+            except Exception as exc:
+                failed += 1
+                logger.warning(
+                    f"[ExpiryCleanup] 删除过期记忆失败 id={memory_id}: {exc}"
+                )
+
+        logger.info(
+            f"[ExpiryCleanup] 清理完成 scanned={len(all_records)}, expired={len(expired_ids)}, "
+            f"deleted={deleted}, failed={failed}, invalid_expiration={invalid_expiration}"
+        )
     except Exception as exc:
         logger.warning(f"[ExpiryCleanup] 清理失败: {exc}")
 
@@ -562,6 +676,7 @@ async def add_memory(
     memory: Any,
     user_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    expiration_date: Optional[str] = None,
     agent_id: Optional[str] = None,
     run_id: Optional[str] = None,
     scope_level: Optional[str] = None,
@@ -622,10 +737,12 @@ async def add_memory(
         }
 
     # 后台执行实际写入，立即返回不阻塞沙盒
-    add_kwargs: Dict[str, Any] = {
-        "metadata": metadata or {},
-        "infer": False,
-    }
+    merged_metadata: Dict[str, Any] = dict(metadata or {})
+    normalized_expiration = _normalize_cli_value(expiration_date)
+    if normalized_expiration:
+        merged_metadata["expiration_date"] = normalized_expiration
+
+    add_kwargs: Dict[str, Any] = {"metadata": merged_metadata, "infer": False}
     _uid = (
         layer_ids["user_id"]
         if (plugin_config.ENABLE_AGENT_SCOPE or target_layer == "global")
@@ -714,7 +831,12 @@ async def search_memory(
         return {"ok": False, "error": "mem0 client init failed"}
 
     if should_skip_retrieval(query):
-        return {"ok": True, "results": [], "text": "(查询被跳过：无需检索)"}
+        return {
+            "ok": True,
+            "results": [],
+            "text": "(查询被跳过：无需检索)",
+            "memory_operations": [],
+        }
 
     scope = resolve_memory_scope(
         _ctx, user_id=user_id, agent_id=agent_id, run_id=run_id
@@ -872,6 +994,98 @@ async def update_memory(
     return {"ok": True, "message": "记忆更新已提交"}
 
 
+async def _update_memory_metadata_job(
+    *,
+    client: Any,
+    memory_id: str,
+    metadata_patch: Optional[Dict[str, Any]],
+    expiration_date: Optional[str],
+    clear_expiration: bool,
+) -> None:
+    all_results_raw = await asyncio.to_thread(client.get_all)
+    all_records = normalize_results(all_results_raw)
+    target_record: Optional[Dict[str, Any]] = None
+    for item in all_records:
+        item_memory_id = _memory_identifier(item)
+        if item_memory_id == memory_id:
+            target_record = item
+            break
+
+    if target_record is None:
+        logger.warning(f"[Memory] 元数据更新失败：未找到 memory_id={memory_id}")
+        return
+
+    memory_text = _extract_memory_text(target_record)
+    if not memory_text:
+        logger.warning(f"[Memory] 元数据更新失败：目标记忆为空 memory_id={memory_id}")
+        return
+
+    merged_metadata: Dict[str, Any] = dict(target_record.get("metadata") or {})
+    if metadata_patch:
+        merged_metadata.update(metadata_patch)
+
+    normalized_expiration = _normalize_cli_value(expiration_date)
+    if normalized_expiration:
+        merged_metadata["expiration_date"] = normalized_expiration
+    elif clear_expiration:
+        merged_metadata.pop("expiration_date", None)
+
+    update_kwargs: Dict[str, Any] = {"metadata": merged_metadata}
+    try:
+        await asyncio.to_thread(client.update, memory_id, memory_text, **update_kwargs)
+        logger.info(f"[Memory] 元数据更新完成 memory_id={memory_id} (原ID保留)")
+        return
+    except TypeError:
+        logger.warning(
+            "[Memory] 当前后端不支持 update(metadata=...)，降级为 add+delete 元数据更新"
+        )
+
+    add_kwargs: Dict[str, Any] = {"metadata": merged_metadata, "infer": False}
+    for scope_key in ("user_id", "agent_id", "run_id"):
+        scope_value = target_record.get(scope_key)
+        if scope_value is not None:
+            add_kwargs[scope_key] = scope_value
+
+    await asyncio.to_thread(client.add, memory_text, **add_kwargs)
+    await asyncio.to_thread(client.delete, memory_id)
+    logger.info(f"[Memory] 元数据更新完成 memory_id={memory_id} (降级模式，已替换ID)")
+
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.BEHAVIOR,
+    name="更新记忆元数据",
+    description=(
+        "更新记忆元数据（非阻塞）。示例：update_memory_metadata(memory_id, {'TYPE':'FACTS'}, expiration_date='2026-12-31T00:00:00Z')"
+    ),
+)
+async def update_memory_metadata(
+    _ctx: Optional[AgentCtx],
+    memory_id: str,
+    metadata_patch: Optional[Dict[str, Any]] = None,
+    expiration_date: Optional[str] = None,
+    clear_expiration: bool = False,
+) -> Dict[str, Any]:
+    """更新记忆元数据（非阻塞，立即返回）。"""
+    client = await get_mem0_client()
+    if client is None:
+        return {"ok": False, "error": "mem0 client init failed"}
+
+    normalized_memory_id = _normalize_cli_value(memory_id)
+    if not normalized_memory_id:
+        return {"ok": False, "error": "memory_id 不能为空"}
+
+    _fire_and_forget(
+        _update_memory_metadata_job(
+            client=client,
+            memory_id=normalized_memory_id,
+            metadata_patch=metadata_patch,
+            expiration_date=expiration_date,
+            clear_expiration=clear_expiration,
+        )
+    )
+    return {"ok": True, "message": "记忆元数据更新已提交"}
+
+
 @plugin.mount_sandbox_method(
     SandboxMethodType.BEHAVIOR,
     name="删除记忆",
@@ -1012,7 +1226,7 @@ async def get_memory_history(
     SandboxMethodType.BEHAVIOR,
     name="记忆指令面板",
     description=(
-        "统一命令入口（支持 add/search/list/update/delete/delete_all/history）。"
+        "统一命令入口（支持 add/search/list/update/update_metadata/delete/delete_all/history）。"
         "示例：memory_command('search', {'query': '查询词'})"
     ),
 )
@@ -1022,7 +1236,7 @@ async def memory_command(
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    统一命令入口（支持 add/search/list/update/delete/delete_all/history）。
+    统一命令入口（支持 add/search/list/update/update_metadata/delete/delete_all/history）。
 
     示例：
         memory_command('search', {'query': '最喜欢的颜色', 'layers': ['global']})
@@ -1044,6 +1258,13 @@ async def memory_command(
             memory=payload.get("memory"),
             user_id=payload.get("user_id"),
             metadata=payload.get("metadata"),
+            expiration_date=(
+                payload.get("expiration_date")
+                or payload.get("expires")
+                or payload.get("expire")
+                or payload.get("expires_at")
+                or payload.get("expiry")
+            ),
             agent_id=payload.get("agent_id"),
             run_id=payload.get("run_id"),
             scope_level=payload.get("scope_level"),
@@ -1080,6 +1301,28 @@ async def memory_command(
             _ctx,
             memory_id=payload.get("memory_id", ""),
             new_memory=payload.get("new_memory", ""),
+        )
+    if action in {"update_metadata", "meta_update", "patch_metadata"}:
+        return await update_memory_metadata(
+            _ctx,
+            memory_id=payload.get("memory_id", ""),
+            metadata_patch=(
+                payload.get("metadata_patch")
+                or payload.get("metadata")
+                or _parse_metadata(payload)
+            ),
+            expiration_date=(
+                payload.get("expiration_date")
+                or payload.get("expires")
+                or payload.get("expire")
+                or payload.get("expires_at")
+                or payload.get("expiry")
+            ),
+            clear_expiration=_normalize_bool_value(
+                payload.get("clear_expiration")
+                or payload.get("clear_expire")
+                or payload.get("clear_expires")
+            ),
         )
     if action == "delete":
         return await delete_memory(_ctx, memory_id=payload.get("memory_id", ""))
@@ -1606,9 +1849,11 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "result = await search_memory(‘猫’, layers=[‘global’])  # 指定层",
         "result = await get_all_memory()  # 列出全部（不要用 search_memory 代替）",
         "result = await get_all_memory(layers=[‘global’])  # 指定层全部",
+        "# search/get_all 返回 memory_operations，可直接使用其中的 memory_id 执行 update/delete/update_metadata",
         "",
         "## 维护",
         "await update_memory(memory_id, ‘新内容’)  # 更新",
+        "await update_memory_metadata(memory_id, expiration_date=‘2026-12-31T00:00:00Z’)  # 仅更新元数据/过期时间",
         "await delete_memory(memory_id)  # 删除过时记忆（主动维护！）",
         "",
         "## 层级说明",
@@ -2001,13 +2246,14 @@ async def mem_search_cmd(
     name="add",
     description="添加一条记忆",
     aliases=["a"],
-    usage="mem.add <文本> [layer=xxx] [tag=TYPE] [user=xxx] [agent=xxx] [run=xxx]",
+    usage="mem.add <文本> [layer=xxx] [tag=TYPE] [expires=ISO8601] [user=xxx] [agent=xxx] [run=xxx]",
 )
 async def mem_add_cmd(
     context: CommandExecutionContext,
     text: Annotated[str, Arg("记忆内容", positional=True, greedy=True)] = "",
     layer: Annotated[str, Arg("目标层级")] = "",
     tag: Annotated[str, Arg("记忆标签")] = "",
+    expires: Annotated[str, Arg("过期时间（ISO8601）")] = "",
     user: Annotated[str, Arg("用户作用域ID")] = "",
     agent: Annotated[str, Arg("人设作用域ID")] = "",
     run: Annotated[str, Arg("会话作用域ID")] = "",
@@ -2017,6 +2263,8 @@ async def mem_add_cmd(
     options: Dict[str, str] = {}
     if tag:
         options["tag"] = tag
+    if expires:
+        options["expiration_date"] = expires
     if user:
         options["user"] = user
     if agent:
