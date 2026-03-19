@@ -43,7 +43,9 @@ _MIGRATION_IN_FLIGHT: Set[Tuple[Optional[str], Optional[str], Optional[str], str
     set()
 )
 _turn_counter: Dict[str, int] = {}  # chat_key → turn count
-_REGISTERED_SCOPE_QUERIES: Set[Tuple[Optional[str], Optional[str], Optional[str]]] = set()
+_REGISTERED_SCOPE_QUERIES: Set[Tuple[Optional[str], Optional[str], Optional[str]]] = (
+    set()
+)
 
 
 def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
@@ -77,14 +79,20 @@ def _normalize_memory_metadata(
     if normalized_expiration:
         merged_metadata["expiration_date"] = normalized_expiration
     elif "expiration_date" in merged_metadata:
-        existing_expiration = _normalize_cli_value(merged_metadata.get("expiration_date"))
+        existing_expiration = _normalize_cli_value(
+            merged_metadata.get("expiration_date")
+        )
         if existing_expiration:
             merged_metadata["expiration_date"] = existing_expiration
         else:
             merged_metadata.pop("expiration_date", None)
 
-    importance_source = importance if importance is not None else merged_metadata.get("importance")
-    merged_metadata["importance"] = _normalize_importance_value(importance_source, default=5)
+    importance_source = (
+        importance if importance is not None else merged_metadata.get("importance")
+    )
+    merged_metadata["importance"] = _normalize_importance_value(
+        importance_source, default=5
+    )
     return merged_metadata
 
 
@@ -141,9 +149,7 @@ async def _scan_records_from_registered_scopes(client: Any) -> List[Dict[str, An
         try:
             raw = await asyncio.to_thread(client.get_all, **kwargs)
         except Exception as exc:
-            logger.warning(
-                f"[Memory] 作用域扫描失败 kwargs={kwargs}: {exc}"
-            )
+            logger.warning(f"[Memory] 作用域扫描失败 kwargs={kwargs}: {exc}")
             continue
         for item in normalize_results(raw):
             memory_id = _memory_identifier(item)
@@ -351,9 +357,7 @@ def _parse_metadata(options: Dict[str, str]) -> Dict[str, Any]:
         metadata["expiration_date"] = expiration_date
 
     importance_raw = (
-        options.get("importance")
-        or options.get("imp")
-        or options.get("priority")
+        options.get("importance") or options.get("imp") or options.get("priority")
     )
     if importance_raw is not None:
         metadata["importance"] = _normalize_importance_value(importance_raw, default=5)
@@ -728,7 +732,9 @@ def _render_distribution(counter: Counter, title: str, max_items: int = 8) -> Li
     return lines
 
 
-def _summarize_memory_visual(merged_results: List[Dict[str, Any]], *, limit: int) -> str:
+def _summarize_memory_visual(
+    merged_results: List[Dict[str, Any]], *, limit: int
+) -> str:
     if not merged_results:
         return "(无结果)"
 
@@ -759,7 +765,9 @@ def _summarize_memory_visual(merged_results: List[Dict[str, Any]], *, limit: int
         layer = str(item.get("layer") or item.get("scope_level") or "unknown")
         layer_counter[layer] += 1
 
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        metadata = (
+            item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        )
         tag = metadata.get("TYPE")
         if isinstance(tag, str) and tag.strip():
             tag_counter[tag.strip()] += 1
@@ -783,7 +791,9 @@ def _summarize_memory_visual(merged_results: List[Dict[str, Any]], *, limit: int
             source_id = str(item.get("id") or item.get("memory_id") or "")
             if not source_id:
                 continue
-            related_ids = metadata.get("related_memory_ids") or metadata.get("links") or []
+            related_ids = (
+                metadata.get("related_memory_ids") or metadata.get("links") or []
+            )
             if isinstance(related_ids, str):
                 related_ids = [related_ids]
             if isinstance(related_ids, list):
@@ -807,7 +817,121 @@ def _summarize_memory_visual(merged_results: List[Dict[str, Any]], *, limit: int
     lines.append("\n🕒 最近时间线")
     lines.extend(timeline_lines or ["- (无时间数据)"])
     lines.append("\n🕸️ 关系视图")
-    lines.extend(relation_lines or ["- (未检测到 related_memory_ids/links 关系，可先通过 metadata 写入关系字段)"])
+    lines.extend(
+        relation_lines
+        or [
+            "- (未检测到 related_memory_ids/links 关系，可先通过 metadata 写入关系字段)"
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _summarize_memory_management(
+    merged_results: List[Dict[str, Any]], *, limit: int, include_ops: bool
+) -> str:
+    if not merged_results:
+        return "📋 记忆管理面板\n(无结果)"
+
+    rows_with_time: List[Tuple[Optional[datetime], Dict[str, Any]]] = [
+        (_extract_item_time(item), item) for item in merged_results
+    ]
+    rows_with_time.sort(
+        key=lambda row: row[0] or datetime(1970, 1, 1, tzinfo=timezone.utc),
+        reverse=True,
+    )
+    selected_rows = rows_with_time[:limit]
+    selected = [item for _, item in selected_rows]
+
+    layer_counter: Counter = Counter()
+    type_counter: Counter = Counter()
+    importance_counter: Counter = Counter()
+
+    now = datetime.now(timezone.utc)
+    expiring_7d = 0
+    expired = 0
+    no_expire = 0
+
+    for _, item in selected_rows:
+        layer = str(item.get("layer") or item.get("scope_level") or "unknown")
+        layer_counter[layer] += 1
+
+        metadata = (
+            item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        )
+        tag = metadata.get("TYPE")
+        if isinstance(tag, str) and tag.strip():
+            type_counter[tag.strip()] += 1
+        elif isinstance(tag, list):
+            for tag_item in tag:
+                if isinstance(tag_item, str) and tag_item.strip():
+                    type_counter[tag_item.strip()] += 1
+        else:
+            type_counter["(未标注)"] += 1
+
+        importance = _normalize_importance_value(metadata.get("importance"), default=5)
+        importance_counter[f"P{importance}"] += 1
+
+        expiration_dt = _parse_expiration_datetime(metadata.get("expiration_date"))
+        if expiration_dt is None:
+            no_expire += 1
+        elif expiration_dt < now:
+            expired += 1
+        elif (expiration_dt - now).total_seconds() <= 7 * 24 * 3600:
+            expiring_7d += 1
+
+    ranked = list(selected)
+    ranked.sort(
+        key=lambda item: _get_combined_score(item, importance_weight=0.45), reverse=True
+    )
+    top_rows = ranked[:8]
+
+    lines: List[str] = []
+    lines.append(f"📋 记忆管理面板（样本 {len(selected)}/{len(merged_results)}）")
+    lines.extend(_render_distribution(layer_counter, "\n🧱 层级分布"))
+    lines.extend(_render_distribution(type_counter, "\n🏷️ 类型分布"))
+    lines.extend(_render_distribution(importance_counter, "\n⭐ 重要性分布"))
+    lines.append("\n⏳ 过期健康度（基于采样）")
+    lines.append(f"- 7天内即将过期: {expiring_7d}")
+    lines.append(f"- 已过期(待清理): {expired}")
+    lines.append(f"- 无过期时间: {no_expire}")
+
+    lines.append("\n🧭 建议优先维护（按综合分排序）")
+    if top_rows:
+        for item in top_rows:
+            memory_id = str(item.get("id") or item.get("memory_id") or "未知ID")
+            metadata = (
+                item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            )
+            layer = str(item.get("layer") or item.get("scope_level") or "unknown")
+            tag = metadata.get("TYPE")
+            importance = _normalize_importance_value(
+                metadata.get("importance"), default=5
+            )
+            expires = metadata.get("expiration_date") or "-"
+            text = _extract_memory_text(item).replace("\n", " ").strip()[:42]
+            if isinstance(tag, str):
+                tag_label = tag if tag.strip() else "(未标注)"
+            elif isinstance(tag, list):
+                safe_tags = [str(t).strip() for t in tag if str(t).strip()]
+                tag_label = ",".join(safe_tags[:2]) if safe_tags else "(未标注)"
+            else:
+                tag_label = "(未标注)"
+            lines.append(
+                f"- [{memory_id}] [{layer}] [{tag_label}] [P{importance}] [expires={expires}] {text}"
+            )
+    else:
+        lines.append("- (无可维护记录)")
+
+    if include_ops and top_rows:
+        lines.append("\n🛠️ 快捷管理指令")
+        for item in top_rows[:3]:
+            memory_id = str(item.get("id") or item.get("memory_id") or "")
+            if not memory_id:
+                continue
+            lines.append(f"- mem history {memory_id}")
+            lines.append(f"- mem edit {memory_id} <新内容>")
+            lines.append(f"- mem delete {memory_id}")
+
     return "\n".join(lines)
 
 
@@ -860,6 +984,83 @@ async def _command_visualize_memory(
     return _summarize_memory_visual(normalized_results, limit=safe_limit)
 
 
+async def _command_memory_panel(
+    scope: MemoryScope,
+    layers: Optional[List[str]],
+    tags: Optional[List[str]],
+    limit: int,
+    include_ops: bool,
+) -> str:
+    plugin_config = get_memory_config()
+    client = await get_mem0_client()
+    if client is None:
+        return _format_command_error("mem0 client init failed，检查插件配置。")
+    if not scope.has_scope():
+        return _format_command_error("缺少 user_id/agent_id/run_id，无法展示管理面板。")
+
+    _register_scope_context(scope, plugin_config)
+
+    layer_order = _build_layer_order(
+        scope,
+        layers=layers,
+        preferred=None,
+        session_enabled=plugin_config.SESSION_ISOLATION,
+        agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
+    )
+    if not layer_order:
+        return _format_command_error("未找到可视化层级。")
+
+    merged_results: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+    for layer in layer_order:
+        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
+        if not layer_ids:
+            continue
+        _register_layer_scope(layer_ids)
+        raw, legacy_hit = await _read_with_legacy_fallback(
+            client=client,
+            layer_ids=layer_ids,
+            plugin_config=plugin_config,
+            op="get_all",
+        )
+        if legacy_hit:
+            logger.info(f"[Memory] 管理面板层级 {layer} 触发旧作用域兼容读取")
+        merged_results.extend(_annotate_results(raw, layer_ids["layer"], seen_ids))
+
+    normalized_results = normalize_results(merged_results)
+    if tags:
+        wanted = {str(tag).strip() for tag in tags if str(tag).strip()}
+        if wanted:
+            filtered_results: List[Dict[str, Any]] = []
+            for item in normalized_results:
+                metadata = (
+                    item.get("metadata")
+                    if isinstance(item.get("metadata"), dict)
+                    else {}
+                )
+                tag_value = metadata.get("TYPE")
+                if isinstance(tag_value, str):
+                    if tag_value in wanted:
+                        filtered_results.append(item)
+                elif isinstance(tag_value, list):
+                    hit = False
+                    for value in tag_value:
+                        if isinstance(value, str) and value in wanted:
+                            hit = True
+                            break
+                    if hit:
+                        filtered_results.append(item)
+            normalized_results = filtered_results
+
+    safe_limit = max(10, min(limit, 500))
+    return _summarize_memory_management(
+        normalized_results,
+        limit=safe_limit,
+        include_ops=include_ops,
+    )
+
+
 def _parse_expiration_datetime(value: Any) -> Optional[datetime]:
     if not isinstance(value, str):
         return None
@@ -888,9 +1089,7 @@ async def _cleanup_expired_memories() -> None:
 
         all_records = await _scan_records_from_registered_scopes(client)
         if not all_records:
-            logger.info(
-                "[ExpiryCleanup] 暂无已注册作用域或未读到记录，跳过本轮"
-            )
+            logger.info("[ExpiryCleanup] 暂无已注册作用域或未读到记录，跳过本轮")
             return
 
         expired_ids: List[str] = []
@@ -2563,6 +2762,76 @@ async def mem_search_cmd(
     parsed_layers = _parse_layers(layer) if layer else None
     message_text = await _command_search(
         scope, query=query, layers=parsed_layers, limit=limit
+    )
+    return CmdCtl.success(message_text)
+
+
+@mem_group.command(
+    name="visual",
+    description="显示记忆数据可视化总览",
+    aliases=["viz"],
+    usage="mem.visual [layer=xxx] [tags=TAG1,TAG2] [limit=60] [user=xxx] [agent=xxx] [run=xxx]",
+)
+async def mem_visual_cmd(
+    context: CommandExecutionContext,
+    layer: Annotated[str, Arg("层级过滤", positional=True)] = "",
+    tags: Annotated[str, Arg("标签过滤（逗号分隔）")] = "",
+    limit: Annotated[int, Arg("可视化采样数量", range=(10, 500))] = 60,
+    user: Annotated[str, Arg("用户作用域ID")] = "",
+    agent: Annotated[str, Arg("人设作用域ID")] = "",
+    run: Annotated[str, Arg("会话作用域ID")] = "",
+) -> CommandResponse:
+    options: Dict[str, str] = {}
+    if user:
+        options["user"] = user
+    if agent:
+        options["agent"] = agent
+    if run:
+        options["run"] = run
+    scope = _build_scope_from_context(context, options)
+    parsed_layers = _parse_layers(layer) if layer else None
+    parsed_tags = _parse_tags(tags) if tags else None
+    message_text = await _command_visualize_memory(
+        scope,
+        layers=parsed_layers,
+        tags=parsed_tags,
+        limit=limit,
+    )
+    return CmdCtl.success(message_text)
+
+
+@mem_group.command(
+    name="panel",
+    description="显示可视化管理面板（统计+维护建议）",
+    aliases=["dashboard", "board"],
+    usage="mem.panel [layer=xxx] [tags=TAG1,TAG2] [limit=80] [ops=true|false] [user=xxx] [agent=xxx] [run=xxx]",
+)
+async def mem_panel_cmd(
+    context: CommandExecutionContext,
+    layer: Annotated[str, Arg("层级过滤", positional=True)] = "",
+    tags: Annotated[str, Arg("标签过滤（逗号分隔）")] = "",
+    limit: Annotated[int, Arg("面板采样数量", range=(10, 500))] = 80,
+    ops: Annotated[str, Arg("显示快捷管理指令(true/false)")] = "true",
+    user: Annotated[str, Arg("用户作用域ID")] = "",
+    agent: Annotated[str, Arg("人设作用域ID")] = "",
+    run: Annotated[str, Arg("会话作用域ID")] = "",
+) -> CommandResponse:
+    options: Dict[str, str] = {}
+    if user:
+        options["user"] = user
+    if agent:
+        options["agent"] = agent
+    if run:
+        options["run"] = run
+    scope = _build_scope_from_context(context, options)
+    parsed_layers = _parse_layers(layer) if layer else None
+    parsed_tags = _parse_tags(tags) if tags else None
+    message_text = await _command_memory_panel(
+        scope,
+        layers=parsed_layers,
+        tags=parsed_tags,
+        limit=limit,
+        include_ops=_normalize_bool_value(ops),
     )
     return CmdCtl.success(message_text)
 

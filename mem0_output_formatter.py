@@ -35,7 +35,10 @@ def _filter_expired(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if expiry:
             try:
                 if isinstance(expiry, str):
-                    exp_dt = datetime.fromisoformat(expiry)
+                    raw = expiry.strip()
+                    if raw.endswith("Z"):
+                        raw = raw[:-1] + "+00:00"
+                    exp_dt = datetime.fromisoformat(raw)
                     if exp_dt.tzinfo is None:
                         exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                     if exp_dt < now:
