@@ -180,6 +180,26 @@ def _load_plugin_method_module():
     setattr(pre_search_stub, "convert_db_messages_to_dict", lambda *args, **kwargs: [])
     sys.modules[f"{package_name}.pre_search_utils"] = pre_search_stub
 
+    extraction_parser_stub = types.ModuleType(f"{package_name}.extraction_parser")
+    setattr(extraction_parser_stub, "parse_extracted_memories", lambda *args, **kwargs: [])
+    sys.modules[f"{package_name}.extraction_parser"] = extraction_parser_stub
+
+    extraction_prompts_stub = types.ModuleType(f"{package_name}.extraction_prompts")
+    setattr(extraction_prompts_stub, "ENHANCED_MEMORY_PROMPT", "")
+    sys.modules[f"{package_name}.extraction_prompts"] = extraction_prompts_stub
+
+    query_rewrite_stub = types.ModuleType(f"{package_name}.query_rewrite")
+    setattr(query_rewrite_stub, "should_skip_retrieval", lambda *args, **kwargs: False)
+    sys.modules[f"{package_name}.query_rewrite"] = query_rewrite_stub
+
+    memory_router_stub = types.ModuleType(f"{package_name}.memory_engine_router")
+
+    async def _route_search_stub(*args, **kwargs):
+        return []
+
+    setattr(memory_router_stub, "route_search", _route_search_stub)
+    sys.modules[f"{package_name}.memory_engine_router"] = memory_router_stub
+
     utils_module = importlib.import_module("utils")
     sys.modules[f"{package_name}.utils"] = utils_module
 
@@ -488,6 +508,109 @@ def test_combined_score_uses_config_weight() -> None:
     assert result == 0.65
 
 
+def test_normalize_memory_metadata_sets_default_importance_and_expiration() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    normalized = plugin_method._normalize_memory_metadata(
+        {"TYPE": "FACTS"}, expiration_date="2026-12-31T00:00:00Z"
+    )
+
+    assert normalized["TYPE"] == "FACTS"
+    assert normalized["expiration_date"] == "2026-12-31T00:00:00Z"
+    assert normalized["importance"] == 5
+
+
+def test_parse_metadata_normalizes_importance_value() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    metadata = plugin_method._parse_metadata({"importance": "99"})
+
+    assert metadata["importance"] == 5
+
+
+def test_scan_records_from_registered_scopes_uses_scoped_get_all() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    plugin_method._REGISTERED_SCOPE_QUERIES.clear()
+    plugin_method._register_scope_query(user_id="u1")
+    plugin_method._register_scope_query(agent_id="a1")
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        def get_all(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("user_id") == "u1":
+                return [{"id": "m1", "memory": "u1-memory"}]
+            if kwargs.get("agent_id") == "a1":
+                return [{"id": "m2", "memory": "a1-memory"}]
+            return []
+
+    client = _Client()
+    records = __import__("asyncio").run(plugin_method._scan_records_from_registered_scopes(client))
+
+    assert len(client.calls) == 2
+    assert {tuple(sorted(c.items())) for c in client.calls} == {
+        (("user_id", "u1"),),
+        (("agent_id", "a1"),),
+    }
+    assert len(records) == 2
+    assert {item["id"] for item in records} == {"m1", "m2"}
+
+
+def test_cleanup_expired_memories_does_not_call_unscoped_get_all() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    class _Client:
+        def __init__(self):
+            self.get_all_calls = []
+            self.deleted = []
+
+        def get_all(self, **kwargs):
+            self.get_all_calls.append(kwargs)
+            return [
+                {
+                    "id": "expired-1",
+                    "metadata": {"expiration_date": "2000-01-01T00:00:00Z"},
+                }
+            ]
+
+        def delete(self, memory_id):
+            self.deleted.append(memory_id)
+
+    async def _fake_get_mem0_client():
+        return client
+
+    client = _Client()
+    plugin_method._REGISTERED_SCOPE_QUERIES.clear()
+    plugin_method._register_scope_query(user_id="u-clean")
+    setattr(plugin_method, "get_mem0_client", _fake_get_mem0_client)
+
+    __import__("asyncio").run(plugin_method._cleanup_expired_memories())
+
+    assert client.get_all_calls == [{"user_id": "u-clean"}]
+    assert client.deleted == ["expired-1"]
+
+
+def test_register_scope_context_does_not_register_persona_read_fallback() -> None:
+    plugin_method = _load_plugin_method_module()
+    MemoryScope = _load_memory_scope_class()
+
+    plugin_method._REGISTERED_SCOPE_QUERIES.clear()
+    scope = MemoryScope(user_id=None, agent_id="a-fallback", run_id="r-fallback")
+    config = types.SimpleNamespace(
+        ENABLE_AGENT_SCOPE=True,
+        PERSONA_BIND_USER=True,
+        ENABLE_GUILD_SCOPE=False,
+    )
+
+    plugin_method._register_scope_context(scope, config)
+
+    assert (None, "a-fallback", None) not in plugin_method._REGISTERED_SCOPE_QUERIES
+    assert (None, None, "r-fallback") in plugin_method._REGISTERED_SCOPE_QUERIES
+
+
 if __name__ == "__main__":
     test_agent_scope_switch_disables_persona_layer()
     test_add_default_prefers_long_term_layer()
@@ -500,4 +623,9 @@ if __name__ == "__main__":
     test_pre_search_skip_reason_no_messages()
     test_pre_search_passes_threshold_with_decent_score()
     test_combined_score_uses_config_weight()
+    test_normalize_memory_metadata_sets_default_importance_and_expiration()
+    test_parse_metadata_normalizes_importance_value()
+    test_scan_records_from_registered_scopes_uses_scoped_get_all()
+    test_cleanup_expired_memories_does_not_call_unscoped_get_all()
+    test_register_scope_context_does_not_register_persona_read_fallback()
     print("✅ test_memory_scope_risks passed")

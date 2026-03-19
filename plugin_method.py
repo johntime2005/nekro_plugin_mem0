@@ -4,6 +4,7 @@
 
 import asyncio
 from datetime import datetime, timezone
+from collections import Counter
 from typing import Annotated, Any, Dict, List, Optional, Set, Tuple
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core import logger
@@ -42,6 +43,7 @@ _MIGRATION_IN_FLIGHT: Set[Tuple[Optional[str], Optional[str], Optional[str], str
     set()
 )
 _turn_counter: Dict[str, int] = {}  # chat_key → turn count
+_REGISTERED_SCOPE_QUERIES: Set[Tuple[Optional[str], Optional[str], Optional[str]]] = set()
 
 
 def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
@@ -51,6 +53,106 @@ def _memory_identifier(item: Dict[str, Any]) -> Optional[str]:
         if value:
             return str(value)
     return None
+
+
+def _normalize_importance_value(value: Any, default: int = 5) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return default
+    if 1 <= normalized <= 10:
+        return normalized
+    return default
+
+
+def _normalize_memory_metadata(
+    metadata: Optional[Dict[str, Any]],
+    *,
+    expiration_date: Optional[str] = None,
+    importance: Optional[Any] = None,
+) -> Dict[str, Any]:
+    merged_metadata: Dict[str, Any] = dict(metadata or {})
+
+    normalized_expiration = _normalize_cli_value(expiration_date)
+    if normalized_expiration:
+        merged_metadata["expiration_date"] = normalized_expiration
+    elif "expiration_date" in merged_metadata:
+        existing_expiration = _normalize_cli_value(merged_metadata.get("expiration_date"))
+        if existing_expiration:
+            merged_metadata["expiration_date"] = existing_expiration
+        else:
+            merged_metadata.pop("expiration_date", None)
+
+    importance_source = importance if importance is not None else merged_metadata.get("importance")
+    merged_metadata["importance"] = _normalize_importance_value(importance_source, default=5)
+    return merged_metadata
+
+
+def _register_scope_query(
+    *,
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> None:
+    if user_id is None and agent_id is None and run_id is None:
+        return
+    _REGISTERED_SCOPE_QUERIES.add((user_id, agent_id, run_id))
+
+
+def _register_layer_scope(layer_ids: Optional[Dict[str, Any]]) -> None:
+    if not layer_ids:
+        return
+    _register_scope_query(
+        user_id=layer_ids.get("user_id"),
+        agent_id=layer_ids.get("agent_id"),
+        run_id=layer_ids.get("run_id"),
+    )
+
+
+def _register_scope_context(scope: MemoryScope, plugin_config: Any) -> None:
+    for layer_name in ("conversation", "persona", "global", "guild"):
+        layer_ids = _resolve_layer_ids(scope, layer_name, plugin_config)
+        _register_layer_scope(layer_ids)
+
+
+def _collect_registered_scope_kwargs() -> List[Dict[str, Any]]:
+    return [
+        {
+            key: value
+            for key, value in (
+                ("user_id", user_id),
+                ("agent_id", agent_id),
+                ("run_id", run_id),
+            )
+            if value is not None
+        }
+        for user_id, agent_id, run_id in _REGISTERED_SCOPE_QUERIES
+    ]
+
+
+async def _scan_records_from_registered_scopes(client: Any) -> List[Dict[str, Any]]:
+    scope_kwargs_list = _collect_registered_scope_kwargs()
+    if not scope_kwargs_list:
+        return []
+
+    records: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+    for kwargs in scope_kwargs_list:
+        try:
+            raw = await asyncio.to_thread(client.get_all, **kwargs)
+        except Exception as exc:
+            logger.warning(
+                f"[Memory] 作用域扫描失败 kwargs={kwargs}: {exc}"
+            )
+            continue
+        for item in normalize_results(raw):
+            memory_id = _memory_identifier(item)
+            if memory_id and memory_id in seen_ids:
+                continue
+            if memory_id:
+                seen_ids.add(memory_id)
+            records.append(item)
+    return records
 
 
 def _fire_and_forget(coro) -> None:
@@ -248,12 +350,20 @@ def _parse_metadata(options: Dict[str, str]) -> Dict[str, Any]:
     if expiration_date:
         metadata["expiration_date"] = expiration_date
 
+    importance_raw = (
+        options.get("importance")
+        or options.get("imp")
+        or options.get("priority")
+    )
+    if importance_raw is not None:
+        metadata["importance"] = _normalize_importance_value(importance_raw, default=5)
+
     for key, val in options.items():
         if key.startswith("meta.") or key.startswith("meta_"):
             meta_key = key.split(".", 1)[1] if "." in key else key.split("_", 1)[1]
             if meta_key:
                 metadata[meta_key] = val
-    return metadata
+    return _normalize_memory_metadata(metadata)
 
 
 def _build_scope_from_context(
@@ -565,6 +675,191 @@ def _format_command_error(message: str) -> str:
     return f"❌ {message}"
 
 
+def _parse_time_value(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _extract_item_time(item: Dict[str, Any]) -> Optional[datetime]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    candidates = [
+        item.get("updated_at"),
+        item.get("created_at"),
+        item.get("event_at"),
+        metadata.get("updated_at"),
+        metadata.get("created_at"),
+        metadata.get("event_at"),
+    ]
+    for value in candidates:
+        parsed = _parse_time_value(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _render_distribution(counter: Counter, title: str, max_items: int = 8) -> List[str]:
+    if not counter:
+        return [f"{title}: (无数据)"]
+
+    top_items = counter.most_common(max_items)
+    max_count = top_items[0][1] if top_items else 1
+    width = 18
+    lines = [title]
+    for name, count in top_items:
+        bar_len = max(1, round((count / max_count) * width)) if count > 0 else 0
+        bar = "█" * bar_len
+        lines.append(f"- {name}: {bar} {count}")
+    return lines
+
+
+def _summarize_memory_visual(merged_results: List[Dict[str, Any]], *, limit: int) -> str:
+    if not merged_results:
+        return "(无结果)"
+
+    rows_with_time: List[Tuple[Optional[datetime], Dict[str, Any]]] = [
+        (_extract_item_time(item), item) for item in merged_results
+    ]
+    rows_with_time.sort(
+        key=lambda row: row[0] or datetime(1970, 1, 1, tzinfo=timezone.utc),
+        reverse=True,
+    )
+    selected_rows = rows_with_time[:limit]
+    selected = [item for _, item in selected_rows]
+
+    layer_counter: Counter = Counter()
+    tag_counter: Counter = Counter()
+    importance_counter: Counter = Counter()
+    timeline_lines: List[str] = []
+    relation_lines: List[str] = []
+
+    id_to_text: Dict[str, str] = {}
+    for _, item in selected_rows:
+        memory_id = str(item.get("id") or item.get("memory_id") or "")
+        memory_text = _extract_memory_text(item).replace("\n", " ").strip()
+        if memory_id:
+            id_to_text[memory_id] = memory_text[:22]
+
+    for dt_value, item in selected_rows:
+        layer = str(item.get("layer") or item.get("scope_level") or "unknown")
+        layer_counter[layer] += 1
+
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        tag = metadata.get("TYPE")
+        if isinstance(tag, str) and tag.strip():
+            tag_counter[tag.strip()] += 1
+        elif isinstance(tag, list):
+            for tag_item in tag:
+                if isinstance(tag_item, str) and tag_item.strip():
+                    tag_counter[tag_item.strip()] += 1
+        else:
+            tag_counter["(未标注)"] += 1
+
+        importance = _normalize_importance_value(metadata.get("importance"), default=5)
+        importance_counter[f"P{importance}"] += 1
+
+        if len(timeline_lines) < 12:
+            memory_id = str(item.get("id") or item.get("memory_id") or "未知ID")
+            text = _extract_memory_text(item).replace("\n", " ").strip()[:40]
+            dt_text = dt_value.strftime("%m-%d %H:%M") if dt_value else "--"
+            timeline_lines.append(f"- {dt_text} [{layer}] {memory_id}: {text}")
+
+        if len(relation_lines) < 10:
+            source_id = str(item.get("id") or item.get("memory_id") or "")
+            if not source_id:
+                continue
+            related_ids = metadata.get("related_memory_ids") or metadata.get("links") or []
+            if isinstance(related_ids, str):
+                related_ids = [related_ids]
+            if isinstance(related_ids, list):
+                for rid in related_ids:
+                    if not isinstance(rid, str) or not rid.strip():
+                        continue
+                    target_id = rid.strip()
+                    source_text = id_to_text.get(source_id, "")
+                    target_text = id_to_text.get(target_id, "")
+                    relation_lines.append(
+                        f"- {source_id}({source_text}) -> {target_id}({target_text})"
+                    )
+                    if len(relation_lines) >= 10:
+                        break
+
+    lines: List[str] = []
+    lines.append(f"📊 记忆可视化总览（样本 {len(selected)}/{len(merged_results)}）")
+    lines.extend(_render_distribution(layer_counter, "\n🧱 层级分布"))
+    lines.extend(_render_distribution(tag_counter, "\n🏷️ 类型分布"))
+    lines.extend(_render_distribution(importance_counter, "\n⭐ 重要性分布"))
+    lines.append("\n🕒 最近时间线")
+    lines.extend(timeline_lines or ["- (无时间数据)"])
+    lines.append("\n🕸️ 关系视图")
+    lines.extend(relation_lines or ["- (未检测到 related_memory_ids/links 关系，可先通过 metadata 写入关系字段)"])
+    return "\n".join(lines)
+
+
+async def _command_visualize_memory(
+    scope: MemoryScope,
+    layers: Optional[List[str]],
+    tags: Optional[List[str]],
+    limit: int,
+) -> str:
+    plugin_config = get_memory_config()
+    client = await get_mem0_client()
+    if client is None:
+        return _format_command_error("mem0 client init failed，检查插件配置。")
+    if not scope.has_scope():
+        return _format_command_error("缺少 user_id/agent_id/run_id，无法可视化记忆。")
+
+    _register_scope_context(scope, plugin_config)
+
+    layer_order = _build_layer_order(
+        scope,
+        layers=layers,
+        preferred=None,
+        session_enabled=plugin_config.SESSION_ISOLATION,
+        agent_enabled=plugin_config.ENABLE_AGENT_SCOPE,
+        bind_persona_to_user=plugin_config.PERSONA_BIND_USER,
+    )
+    if not layer_order:
+        return _format_command_error("未找到可视化层级。")
+
+    merged_results: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+    for layer in layer_order:
+        layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
+        if not layer_ids:
+            continue
+        _register_layer_scope(layer_ids)
+        raw, legacy_hit = await _read_with_legacy_fallback(
+            client=client,
+            layer_ids=layer_ids,
+            plugin_config=plugin_config,
+            op="get_all",
+        )
+        if legacy_hit:
+            logger.info(f"[Memory] 可视化层级 {layer} 触发旧作用域兼容读取")
+        merged_results.extend(_annotate_results(raw, layer_ids["layer"], seen_ids))
+
+    formatted = format_get_all_output(merged_results, tags=tags)
+    normalized_results = normalize_results(formatted.get("results", []))
+    safe_limit = max(10, min(limit, 500))
+    return _summarize_memory_visual(normalized_results, limit=safe_limit)
+
+
 def _parse_expiration_datetime(value: Any) -> Optional[datetime]:
     if not isinstance(value, str):
         return None
@@ -591,15 +886,11 @@ async def _cleanup_expired_memories() -> None:
         now = datetime.now(timezone.utc)
         logger.info(f"[ExpiryCleanup] 开始清理过期记忆 ({now.isoformat()})")
 
-        try:
-            all_results_raw = await asyncio.to_thread(client.get_all)
-        except Exception as exc:
-            logger.warning(f"[ExpiryCleanup] 拉取全量记忆失败，跳过本轮: {exc}")
-            return
-
-        all_records = normalize_results(all_results_raw)
+        all_records = await _scan_records_from_registered_scopes(client)
         if not all_records:
-            logger.debug("[ExpiryCleanup] 当前无可清理记忆")
+            logger.info(
+                "[ExpiryCleanup] 暂无已注册作用域或未读到记录，跳过本轮"
+            )
             return
 
         expired_ids: List[str] = []
@@ -681,6 +972,7 @@ async def add_memory(
     run_id: Optional[str] = None,
     scope_level: Optional[str] = None,
     guild_id: Optional[str] = None,
+    importance: Optional[int] = None,
 ) -> Dict[str, Any]:
     """添加记忆到指定层级（非阻塞，立即返回）。
 
@@ -716,6 +1008,8 @@ async def add_memory(
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法写入记忆"}
 
+    _register_scope_context(scope, plugin_config)
+
     guild_enabled = getattr(plugin_config, "ENABLE_GUILD_SCOPE", False)
     target_layer = scope.pick_layer(
         preferred=scope_level,
@@ -737,10 +1031,11 @@ async def add_memory(
         }
 
     # 后台执行实际写入，立即返回不阻塞沙盒
-    merged_metadata: Dict[str, Any] = dict(metadata or {})
-    normalized_expiration = _normalize_cli_value(expiration_date)
-    if normalized_expiration:
-        merged_metadata["expiration_date"] = normalized_expiration
+    merged_metadata = _normalize_memory_metadata(
+        metadata,
+        expiration_date=expiration_date,
+        importance=importance,
+    )
 
     add_kwargs: Dict[str, Any] = {"metadata": merged_metadata, "infer": False}
     _uid = (
@@ -760,6 +1055,7 @@ async def add_memory(
         add_kwargs["agent_id"] = _aid
     if _rid is not None:
         add_kwargs["run_id"] = _rid
+    _register_scope_query(user_id=_uid, agent_id=_aid, run_id=_rid)
 
     # 去重检查
     if plugin_config.DEDUP_ENABLED:
@@ -849,6 +1145,8 @@ async def search_memory(
             "error": "缺少可用的 user_id/agent_id/run_id，无法搜索记忆",
         }
 
+    _register_scope_context(scope, plugin_config)
+
     guild_enabled = getattr(plugin_config, "ENABLE_GUILD_SCOPE", False)
     layer_order = _build_layer_order(
         scope,
@@ -936,6 +1234,8 @@ async def get_all_memory(
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法获取记忆"}
 
+    _register_scope_context(scope, plugin_config)
+
     layer_order = _build_layer_order(
         scope,
         layers=layers,
@@ -1002,8 +1302,7 @@ async def _update_memory_metadata_job(
     expiration_date: Optional[str],
     clear_expiration: bool,
 ) -> None:
-    all_results_raw = await asyncio.to_thread(client.get_all)
-    all_records = normalize_results(all_results_raw)
+    all_records = await _scan_records_from_registered_scopes(client)
     target_record: Optional[Dict[str, Any]] = None
     for item in all_records:
         item_memory_id = _memory_identifier(item)
@@ -1029,6 +1328,8 @@ async def _update_memory_metadata_job(
         merged_metadata["expiration_date"] = normalized_expiration
     elif clear_expiration:
         merged_metadata.pop("expiration_date", None)
+
+    merged_metadata = _normalize_memory_metadata(merged_metadata)
 
     update_kwargs: Dict[str, Any] = {"metadata": merged_metadata}
     try:
@@ -1069,6 +1370,11 @@ async def update_memory_metadata(
     client = await get_mem0_client()
     if client is None:
         return {"ok": False, "error": "mem0 client init failed"}
+
+    plugin_config = get_memory_config()
+    scope = resolve_memory_scope(_ctx)
+    if scope.has_scope():
+        _register_scope_context(scope, plugin_config)
 
     normalized_memory_id = _normalize_cli_value(memory_id)
     if not normalized_memory_id:
@@ -1151,6 +1457,8 @@ async def delete_all_memory(
     if not scope.has_scope():
         return {"ok": False, "error": "缺少 user_id/agent_id/run_id，无法删除记忆"}
 
+    _register_scope_context(scope, plugin_config)
+
     layer_order = _build_layer_order(
         scope,
         layers=layers,
@@ -1168,6 +1476,7 @@ async def delete_all_memory(
         layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
         if not layer_ids:
             continue
+        _register_layer_scope(layer_ids)
         target_layers.append(layer_ids["layer"])
 
         async def _do_delete_all(_layer_ids=layer_ids):
@@ -1268,6 +1577,7 @@ async def memory_command(
             agent_id=payload.get("agent_id"),
             run_id=payload.get("run_id"),
             scope_level=payload.get("scope_level"),
+            importance=payload.get("importance"),
         )
     if action == "search":
         resp = await search_memory(
@@ -1763,9 +2073,10 @@ async def _do_passive_extraction(
                 memory=mem["content"],
                 metadata={
                     "TYPE": mem.get("type", "contextual"),
-                    "importance": mem.get("importance", 5),
                     "_auto_extracted": True,
                 },
+                expiration_date=mem.get("expiration_date"),
+                importance=mem.get("importance", 5),
                 scope_level=config.AUTO_EXTRACT_TARGET_LAYER,
             )
     except Exception as exc:
@@ -1840,8 +2151,8 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "✅ 正确：add_memory('内容', scope_level='global')",
         "",
         "## 写操作（非阻塞，可与 send_text 同一代码块）",
-        "await add_memory(‘用户喜欢猫’, scope_level=’global’)",
-        "await add_memory(‘用户今天心情好’, scope_level=’persona’)",
+        "await add_memory(‘用户喜欢猫’, scope_level=’global’, importance=8)",
+        "await add_memory(‘用户今天心情好’, scope_level=’persona’, expiration_date=’2026-12-31T00:00:00Z’, importance=6)",
         "await send_text(_ctx, ‘好的，我记住了！’)  # send_text 仍需 _ctx",
         "",
         "## 读操作（必须单独代码块，等待结果后再 send_text）",
@@ -1855,6 +2166,7 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "await update_memory(memory_id, ‘新内容’)  # 更新",
         "await update_memory_metadata(memory_id, expiration_date=‘2026-12-31T00:00:00Z’)  # 仅更新元数据/过期时间",
         "await delete_memory(memory_id)  # 删除过时记忆（主动维护！）",
+        "建议在 add_memory 时始终设置 importance（1-10），并为短期信息设置 expiration_date（ISO8601）。",
         "",
         "## 层级说明",
         "conversation: 仅当前对话有效",
@@ -1914,6 +2226,8 @@ async def _command_list_memory(
     if not scope.has_scope():
         return _format_command_error("缺少 user_id/agent_id/run_id，无法列出记忆。")
 
+    _register_scope_context(scope, plugin_config)
+
     layer_order = _build_layer_order(
         scope,
         layers=layers,
@@ -1936,6 +2250,7 @@ async def _command_list_memory(
         if not layer_ids:
             logger.warning(f"[Memory] 跳过层级 {layer}，layer_ids 为空")
             continue
+        _register_layer_scope(layer_ids)
 
         query_user_id = layer_ids["user_id"]
         query_agent_id = layer_ids["agent_id"]
@@ -1983,6 +2298,8 @@ async def _command_clear_memory(scope: MemoryScope, layers: Optional[List[str]])
     if not scope.has_scope():
         return _format_command_error("缺少 user_id/agent_id/run_id，无法清空记忆。")
 
+    _register_scope_context(scope, plugin_config)
+
     layer_order = _build_layer_order(
         scope,
         layers=layers,
@@ -2000,6 +2317,7 @@ async def _command_clear_memory(scope: MemoryScope, layers: Optional[List[str]])
             layer_ids = _resolve_layer_ids(scope, layer, plugin_config)
             if not layer_ids:
                 continue
+            _register_layer_scope(layer_ids)
             _del_kw: Dict[str, Any] = {}
             if layer_ids.get("user_id") is not None:
                 _del_kw["user_id"] = layer_ids["user_id"]
@@ -2047,6 +2365,7 @@ async def _command_search(
 
     if not scope.has_scope():
         return _format_command_error("缺少 user_id/agent_id/run_id，无法搜索记忆。")
+    _register_scope_context(scope, plugin_config)
     layer_order = _build_layer_order(
         scope,
         layers=layers,
@@ -2069,6 +2388,7 @@ async def _command_search(
         if not layer_ids:
             logger.warning(f"[Memory] 搜索跳过层级 {layer}，layer_ids 为空")
             continue
+        _register_layer_scope(layer_ids)
         search_run_id = layer_ids["run_id"]
         search_agent_id = layer_ids["agent_id"]
         search_user_id = layer_ids["user_id"]
@@ -2124,6 +2444,8 @@ async def _command_add(
     if not scope.has_scope():
         return _format_command_error("缺少 user_id/agent_id/run_id，无法写入记忆。")
 
+    _register_scope_context(scope, plugin_config)
+
     target_layer = scope.pick_layer(
         preferred=preferred_layer,
         enable_session_layer=plugin_config.SESSION_ISOLATION,
@@ -2135,10 +2457,13 @@ async def _command_add(
         return _format_command_error(
             "未能确定可用的记忆层级，请提供 layer 或 user_id/agent_id/run_id。"
         )
+    _register_layer_scope(layer_ids)
+
+    normalized_metadata = _normalize_memory_metadata(metadata)
 
     try:
         add_kwargs: Dict[str, Any] = {
-            "metadata": metadata or {},
+            "metadata": normalized_metadata,
             "infer": False,
         }
         _uid = (
