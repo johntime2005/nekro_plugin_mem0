@@ -171,3 +171,8 @@ plugins/workdir
 
 # webui build files
 static
+
+# local agent/workflow metadata (non-plugin)
+.serena/
+.sisyphus/
+.spec-workflow/
