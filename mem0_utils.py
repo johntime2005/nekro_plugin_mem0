@@ -3,20 +3,54 @@ mem0 工具
 """
 
 import asyncio
-from typing import Optional, Union
+import importlib
+from typing import Any, Optional
 from urllib.parse import urlparse
 
-from mem0 import Memory, MemoryClient
-from mem0.configs.base import MemoryConfig
-from mem0.embeddings.configs import EmbedderConfig
-from mem0.llms.configs import LlmConfig
-from mem0.vector_stores.configs import VectorStoreConfig
-from nekro_agent.api.core import get_qdrant_config, get_qdrant_client, logger
+from nekro_agent.api.core import get_qdrant_config, logger
 from .plugin import PluginConfig, get_memory_config, plugin
 from .utils import get_model_group_info
 
-_mem0_instance: Optional[Union[Memory, MemoryClient]] = None
+_mem0_instance: Optional[Any] = None
 _last_config_hash: Optional[str] = None
+_mem0_runtime_cache: Optional[dict[str, Any]] = None
+
+
+def _load_mem0_runtime() -> Optional[dict[str, Any]]:
+    global _mem0_runtime_cache
+    if _mem0_runtime_cache is not None:
+        return _mem0_runtime_cache
+
+    try:
+        mem0_mod = importlib.import_module("mem0")
+        memory_cls = getattr(mem0_mod, "Memory")
+        memory_client_cls = getattr(mem0_mod, "MemoryClient")
+        memory_config_cls = getattr(
+            importlib.import_module("mem0.configs.base"), "MemoryConfig"
+        )
+        embedder_config_cls = getattr(
+            importlib.import_module("mem0.embeddings.configs"), "EmbedderConfig"
+        )
+        llm_config_cls = getattr(
+            importlib.import_module("mem0.llms.configs"), "LlmConfig"
+        )
+        vector_store_config_cls = getattr(
+            importlib.import_module("mem0.vector_stores.configs"), "VectorStoreConfig"
+        )
+        _mem0_runtime_cache = {
+            "module": mem0_mod,
+            "Memory": memory_cls,
+            "MemoryClient": memory_client_cls,
+            "MemoryConfig": memory_config_cls,
+            "EmbedderConfig": embedder_config_cls,
+            "LlmConfig": llm_config_cls,
+            "VectorStoreConfig": vector_store_config_cls,
+        }
+    except Exception as exc:
+        logger.error(f"❌ mem0 依赖加载失败: {exc}")
+        return None
+
+    return _mem0_runtime_cache
 
 
 def _config_incomplete(plugin_config: PluginConfig) -> bool:
@@ -101,8 +135,12 @@ def _build_config_hash(
     return str(hash("|".join(parts)))
 
 
-async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
+async def get_mem0_client() -> Optional[Any]:
     global _mem0_instance, _last_config_hash
+
+    runtime = _load_mem0_runtime()
+    if runtime is None:
+        return None
 
     plugin_config: PluginConfig = get_memory_config()
     qdrant_config = get_qdrant_config()
@@ -137,21 +175,22 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
 
     if _last_config_hash != current_config_hash or _mem0_instance is None:
         try:
-            import mem0
-
             logger.info(
-                f"🚀 [Mem0 Plugin v1.4.0] 初始化中... (mem0ai lib: {getattr(mem0, '__version__', 'unknown')})"
+                f"🚀 [Mem0 Plugin v1.4.0] 初始化中... (mem0ai lib: {getattr(runtime['module'], '__version__', 'unknown')})"
             )
             logger.info("正在创建新的mem0客户端实例...")
 
             if plugin_config.MEM0_API_KEY:
                 _mem0_instance = await asyncio.to_thread(
-                    MemoryClient,
+                    runtime["MemoryClient"],
                     api_key=plugin_config.MEM0_API_KEY,
                     host=plugin_config.MEM0_BASE_URL or None,
                 )
             else:
-                vector_config: dict = {}
+                if llm_group is None or embedding_group is None:
+                    logger.error("❌ 模型组未就绪，无法初始化 mem0 客户端")
+                    return None
+                vector_config: dict[str, Any] = {}
                 if plugin_config.VECTOR_DB == "qdrant":
                     # 使用插件专属的集合名称，确保隔离性
                     collection_name = plugin.get_vector_collection_name()
@@ -211,7 +250,7 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
                         f"暂不支持的向量数据库类型: {plugin_config.VECTOR_DB}"
                     )
 
-                embedder = EmbedderConfig(
+                embedder = runtime["EmbedderConfig"](
                     provider="openai",
                     config={
                         "model": embedding_group.CHAT_MODEL,
@@ -220,7 +259,7 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
                         "openai_base_url": embedding_group.BASE_URL or None,
                     },
                 )
-                llm = LlmConfig(
+                llm = runtime["LlmConfig"](
                     provider="openai",
                     config={
                         "model": llm_group.CHAT_MODEL,
@@ -228,17 +267,19 @@ async def get_mem0_client() -> Optional[Union[Memory, MemoryClient]]:
                         "openai_base_url": llm_group.BASE_URL or None,
                     },
                 )
-                vector_store = VectorStoreConfig(
+                vector_store = runtime["VectorStoreConfig"](
                     provider=plugin_config.VECTOR_DB, config=vector_config
                 )
 
-                memory_config = MemoryConfig(
+                memory_config = runtime["MemoryConfig"](
                     embedder=embedder,
                     vector_store=vector_store,
                     llm=llm,
                     version="v1.1",  # Required for mem0 v1.0.0+
                 )
-                _mem0_instance = await asyncio.to_thread(Memory, config=memory_config)
+                _mem0_instance = await asyncio.to_thread(
+                    runtime["Memory"], config=memory_config
+                )
 
             _last_config_hash = current_config_hash
             logger.success("✓ mem0客户端实例创建成功")

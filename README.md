@@ -104,6 +104,10 @@ class MemoryConfig(ConfigBase):
 - `AUTO_EXTRACT_INTERVAL` (int, 默认 3): 提取间隔（轮次）
 - `AUTO_EXTRACT_TARGET_LAYER` (str, 默认 "persona"): 提取目标层级
 
+### 过期自动清理配置
+- `AUTO_CLEANUP_ENABLED` (bool, 默认 True): 启用过期记忆自动清理后台任务
+- `AUTO_CLEANUP_INTERVAL_SECONDS` (int, 默认 600): 自动清理间隔秒数（最小 30 秒）
+
 ### 查询改写配置
 - `QUERY_REWRITE_ENABLED` (bool, 默认 False): 启用查询改写（会增加延迟）
 
@@ -192,11 +196,18 @@ result = await search_memory(None, "和主人的记忆", agent_id="xinger", user
 
 在聊天中直接使用 `/mem` 风格的命令来查看、删除或添加记忆（需要插件运行在含命令适配器的环境，例如 OneBot）。
 
+> 权限说明：`mem` 命令组默认仅管理员（`SUPER_USER`）可调用。
+
+> 触发语法提示：不同适配器可能显示为 `mem list` 或 `mem.list`，本插件命令组名为 `mem`，子命令包括 `list/search/visual/panel/...`。
+
+> 注意：`/mem` 根命令会返回帮助文本；实际操作请使用 `mem list/search/...` 等子命令。在控制台排查“查不到记忆”时，建议显式传入 `user=xxx agent=xxx run=xxx` 以对齐目标作用域。
+
 - `mem list [layer=conversation|persona|global] [tags=T1,T2]`：按层级列出记忆（默认会话→人设→全局）。
 - `mem visual [layer=xxx] [tags=T1,T2] [limit=60]`：输出记忆可视化总览（层级分布、类型分布、重要性、时间线、关系视图）。
 - `mem panel [layer=xxx] [tags=T1,T2] [limit=80] [ops=true|false]`：输出可视化管理面板（统计、过期健康度、优先维护列表、快捷管理指令）。
   - `tags` 仅匹配 `metadata.TYPE`；未标注 TYPE 的记忆不会被 tags 命中。
 - `mem delete <memory_id>`：删除单条记忆。
+- `mem cleanup`：立即触发一次过期记忆清理（管理员权限，别名 `mem prune`）。
 - `mem clear [layer=conversation|persona|global]`：按层级清空（不填 layer 按默认顺序）。
 - `mem history <memory_id>`：查看指定记忆的历史版本。
 - `mem search <query> [layer=xxx] [limit=5]`：语义搜索并展示结果。

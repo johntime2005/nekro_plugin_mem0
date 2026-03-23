@@ -4,14 +4,14 @@
 
 import base64
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any
 
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core import logger
 from nekro_agent.core.config import ModelConfigGroup, config as core_config
 
 
-def get_preset_id(chat_key: Optional[str]) -> str:
+def get_preset_id(chat_key: str | None) -> str:
     if not chat_key:
         return "default"
     return base64.urlsafe_b64encode(chat_key.encode()).decode()
@@ -21,7 +21,7 @@ def decode_id(encoded: str) -> str:
     return base64.urlsafe_b64decode(encoded.encode()).decode()
 
 
-def _normalize(value: Optional[str]) -> Optional[str]:
+def _normalize(value: str | None) -> str | None:
     if value is None:
         return None
     value = str(value).strip()
@@ -30,21 +30,23 @@ def _normalize(value: Optional[str]) -> Optional[str]:
 
 @dataclass
 class MemoryScope:
-    user_id: Optional[str]
-    agent_id: Optional[str]
-    run_id: Optional[str]
-    guild_id: Optional[str] = None
-    preset_title: Optional[str] = None
+    user_id: str | None
+    agent_id: str | None
+    run_id: str | None
+    guild_id: str | None = None
+    preset_title: str | None = None
 
     def has_scope(self) -> bool:
         return any([self.user_id, self.agent_id, self.run_id, self.guild_id])
 
     @property
-    def persona_id(self) -> Optional[str]:
+    def persona_id(self) -> str | None:
         """别名：agent_id 即人设ID。"""
         return self.agent_id
 
-    def available_layers(self, enable_agent_layer: bool = True, enable_guild_layer: bool = False) -> dict:
+    def available_layers(
+        self, enable_agent_layer: bool = True, enable_guild_layer: bool = False
+    ) -> dict[str, bool]:
         return {
             "conversation": bool(self.run_id),
             "persona": bool(self.agent_id) and enable_agent_layer,
@@ -52,7 +54,7 @@ class MemoryScope:
             "guild": bool(self.guild_id) and enable_guild_layer,
         }
 
-    def _normalize_layer(self, layer: str) -> Optional[str]:
+    def _normalize_layer(self, layer: str) -> str | None:
         mapping = {
             "conversation": "conversation",
             "session": "conversation",
@@ -74,7 +76,7 @@ class MemoryScope:
         enable_agent_layer: bool = True,
         bind_persona_to_user: bool = False,
         enable_guild_layer: bool = False,
-    ) -> Optional[dict]:
+    ) -> dict[str, str | None] | None:
         normalized = self._normalize_layer(layer)
         if normalized == "conversation" and self.run_id:
             return {
@@ -121,8 +123,8 @@ class MemoryScope:
         enable_agent_layer: bool = True,
         prefer_long_term: bool = False,
         enable_guild_layer: bool = False,
-    ) -> List[str]:
-        order: List[str] = []
+    ) -> list[str]:
+        order: list[str] = []
         if prefer_long_term:
             if enable_agent_layer and self.agent_id:
                 order.append("persona")
@@ -148,12 +150,12 @@ class MemoryScope:
 
     def pick_layer(
         self,
-        preferred: Optional[str],
+        preferred: str | None,
         enable_session_layer: bool = True,
         enable_agent_layer: bool = True,
         prefer_long_term: bool = False,
         enable_guild_layer: bool = False,
-    ) -> Optional[str]:
+    ) -> str | None:
         """选择最合适的层级，优先使用显式指定，其次按默认优先级。"""
         if preferred:
             normalized = self._normalize_layer(preferred)
@@ -169,19 +171,23 @@ class MemoryScope:
             prefer_long_term=prefer_long_term,
             enable_guild_layer=enable_guild_layer,
         ):
-            if self.layer_ids(layer, enable_agent_layer=enable_agent_layer, enable_guild_layer=enable_guild_layer):
+            if self.layer_ids(
+                layer,
+                enable_agent_layer=enable_agent_layer,
+                enable_guild_layer=enable_guild_layer,
+            ):
                 return layer
         return None
 
 
 def resolve_memory_scope(
-    ctx: Optional[AgentCtx],
-    user_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    run_id: Optional[str] = None,
-    persona_id: Optional[str] = None,
+    ctx: AgentCtx | None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+    run_id: str | None = None,
+    persona_id: str | None = None,
 ) -> MemoryScope:
-    def _safe_getattr(obj, name: str, default=None) -> Optional[str]:
+    def _safe_getattr(obj: Any, name: str, default: Any = None) -> Any:
         try:
             return getattr(obj, name, default)
         except Exception:
@@ -238,11 +244,11 @@ def resolve_memory_scope(
         get_preset_id(resolved_run_source) if resolved_run_source else None
     )
 
-    resolved_guild_id: Optional[str] = None
-    if hasattr(ctx, 'group_id') and _safe_getattr(ctx, 'group_id'):
-        resolved_guild_id = _normalize(str(_safe_getattr(ctx, 'group_id')))
-    elif hasattr(ctx, 'channel_id') and _safe_getattr(ctx, 'channel_id'):
-        _chan = _normalize(str(_safe_getattr(ctx, 'channel_id')))
+    resolved_guild_id: str | None = None
+    if hasattr(ctx, "group_id") and _safe_getattr(ctx, "group_id"):
+        resolved_guild_id = _normalize(str(_safe_getattr(ctx, "group_id")))
+    elif hasattr(ctx, "channel_id") and _safe_getattr(ctx, "channel_id"):
+        _chan = _normalize(str(_safe_getattr(ctx, "channel_id")))
         if _chan and _chan != resolved_user_id:
             resolved_guild_id = _chan
 
@@ -262,7 +268,7 @@ def resolve_memory_scope(
 
 
 def get_model_group_info(
-    model_name: str, expected_type: Optional[str] = None
+    model_name: str, expected_type: str | None = None
 ) -> ModelConfigGroup:
     """根据模型组名称获取配置，必要时校验模型类型。"""
     try:

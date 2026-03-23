@@ -3,6 +3,7 @@
 """
 
 from typing import Optional
+
 from nekro_agent.api.plugin import ExtraField
 from nekro_agent.services.plugin.base import ConfigBase, NekroPlugin
 from pydantic import Field
@@ -185,6 +186,17 @@ class PluginConfig(ConfigBase):
         description="被动提取的记忆写入哪个层级（conversation/persona/global）",
     )
 
+    AUTO_CLEANUP_ENABLED: bool = Field(
+        default=True,
+        title="启用过期自动清理",
+        description="是否启用过期记忆的后台自动清理任务",
+    )
+    AUTO_CLEANUP_INTERVAL_SECONDS: int = Field(
+        default=600,
+        title="自动清理间隔（秒）",
+        description="后台过期清理任务的执行间隔（最小30秒）",
+    )
+
     QUERY_REWRITE_ENABLED: bool = Field(
         default=False,
         title="启用查询改写",
@@ -237,27 +249,6 @@ class PluginConfig(ConfigBase):
         default=0.85,
         title="EMGAS 传播衰减",
         description="能量传播时的保留比例（0.85 = 15% 损失）",
-    )
-
-    AUTO_EXPIRATION_ENABLED: bool = Field(
-        default=True,
-        title="启用自动过期",
-        description="根据记忆类型和重要性自动计算过期时间（仅在未显式指定 expiration_date 时生效）",
-    )
-    ACCESS_REINFORCEMENT_ENABLED: bool = Field(
-        default=True,
-        title="启用访问强化",
-        description="访问记忆时自动延长过期时间并记录访问次数",
-    )
-    REINFORCEMENT_EXTEND_RATIO: float = Field(
-        default=0.2,
-        title="强化延长比例",
-        description="每次访问延长原始 TTL 的比例（0.2 = 延长 20%）",
-    )
-    EXPIRY_CLEANUP_INTERVAL: int = Field(
-        default=600,
-        title="过期清理间隔（秒）",
-        description="自动清理过期记忆的间隔时间（秒），最小 60",
     )
 
 

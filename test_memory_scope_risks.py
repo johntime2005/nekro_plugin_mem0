@@ -72,6 +72,8 @@ def _load_plugin_method_module():
         AUTO_EXTRACT_ENABLED = False
         AUTO_EXTRACT_INTERVAL = 3
         AUTO_EXTRACT_TARGET_LAYER = "persona"
+        AUTO_CLEANUP_ENABLED = True
+        AUTO_CLEANUP_INTERVAL_SECONDS = 600
         DEDUP_ENABLED = False
 
     class _DummyPlugin:
@@ -102,6 +104,12 @@ def _load_plugin_method_module():
                     return _decorator
 
             return _DummyGroup()
+
+        def mount_command(self, *args, **kwargs):
+            def _decorator(func):
+                return func
+
+            return _decorator
 
     setattr(plugin_stub, "plugin", _DummyPlugin())
     setattr(plugin_stub, "get_memory_config", lambda: _DummyPluginConfig())
@@ -181,7 +189,9 @@ def _load_plugin_method_module():
     sys.modules[f"{package_name}.pre_search_utils"] = pre_search_stub
 
     extraction_parser_stub = types.ModuleType(f"{package_name}.extraction_parser")
-    setattr(extraction_parser_stub, "parse_extracted_memories", lambda *args, **kwargs: [])
+    setattr(
+        extraction_parser_stub, "parse_extracted_memories", lambda *args, **kwargs: []
+    )
     sys.modules[f"{package_name}.extraction_parser"] = extraction_parser_stub
 
     extraction_prompts_stub = types.ModuleType(f"{package_name}.extraction_prompts")
@@ -520,6 +530,26 @@ def test_normalize_memory_metadata_sets_default_importance_and_expiration() -> N
     assert normalized["importance"] == 5
 
 
+def test_normalize_memory_metadata_discards_invalid_expiration() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    normalized = plugin_method._normalize_memory_metadata(
+        {"TYPE": "FACTS", "expiration_date": "not-a-date"}
+    )
+
+    assert "expiration_date" not in normalized
+
+
+def test_resolve_cleanup_interval_seconds_has_minimum() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    interval = plugin_method._resolve_cleanup_interval_seconds(
+        types.SimpleNamespace(AUTO_CLEANUP_INTERVAL_SECONDS=1)
+    )
+
+    assert interval == 30
+
+
 def test_parse_metadata_normalizes_importance_value() -> None:
     plugin_method = _load_plugin_method_module()
 
@@ -548,7 +578,9 @@ def test_scan_records_from_registered_scopes_uses_scoped_get_all() -> None:
             return []
 
     client = _Client()
-    records = __import__("asyncio").run(plugin_method._scan_records_from_registered_scopes(client))
+    records = __import__("asyncio").run(
+        plugin_method._scan_records_from_registered_scopes(client)
+    )
 
     assert len(client.calls) == 2
     assert {tuple(sorted(c.items())) for c in client.calls} == {
@@ -593,6 +625,45 @@ def test_cleanup_expired_memories_does_not_call_unscoped_get_all() -> None:
     assert client.deleted == ["expired-1"]
 
 
+def test_delete_memory_rejects_blank_memory_id() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    class _Client:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, memory_id):
+            self.deleted.append(memory_id)
+
+    async def _fake_get_mem0_client():
+        return client
+
+    client = _Client()
+    setattr(plugin_method, "get_mem0_client", _fake_get_mem0_client)
+
+    result = __import__("asyncio").run(plugin_method.delete_memory(None, "   "))
+
+    assert result["ok"] is False
+    assert "不能为空" in result["error"]
+    assert client.deleted == []
+
+
+def test_memory_command_cleanup_dispatches_to_cleanup_expired_memories() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    async def _fake_cleanup(_ctx):
+        return {"ok": True, "message": "过期记忆清理完成"}
+
+    setattr(plugin_method, "cleanup_expired_memories", _fake_cleanup)
+
+    result = __import__("asyncio").run(
+        plugin_method.memory_command(None, "cleanup", {})
+    )
+
+    assert result["ok"] is True
+    assert result["message"] == "过期记忆清理完成"
+
+
 def test_register_scope_context_does_not_register_persona_read_fallback() -> None:
     plugin_method = _load_plugin_method_module()
     MemoryScope = _load_memory_scope_class()
@@ -611,6 +682,67 @@ def test_register_scope_context_does_not_register_persona_read_fallback() -> Non
     assert (None, None, "r-fallback") in plugin_method._REGISTERED_SCOPE_QUERIES
 
 
+def test_mem_command_group_requires_super_user() -> None:
+    file_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "plugin_method.py"
+    )
+    with open(file_path, "r", encoding="utf-8") as f:
+        source = f.read()
+
+    anchor = "mem_group = plugin.mount_command_group("
+    assert anchor in source
+
+    after_anchor = source.split(anchor, 1)[1]
+    group_block = after_anchor.split(")", 1)[0]
+    assert "permission=CommandPermission.SUPER_USER" in group_block
+
+
+def test_mem_root_command_is_registered_with_super_user_permission() -> None:
+    file_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "plugin_method.py"
+    )
+    with open(file_path, "r", encoding="utf-8") as f:
+        source = f.read()
+
+    anchor = "@plugin.mount_command("
+    assert anchor in source
+    assert 'name="mem"' in source
+    assert "permission=CommandPermission.SUPER_USER" in source
+
+
+def test_mem_root_help_text_contains_key_commands() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    text = plugin_method._build_mem_root_help_text()
+
+    assert "mem 命令帮助" in text
+    assert "mem.list" in text
+    assert "mem.search" in text
+    assert "mem.add" in text
+    assert "mem.clear" in text
+
+
+def test_build_scope_from_context_uses_resolve_fallback_fields() -> None:
+    plugin_method = _load_plugin_method_module()
+
+    class _CmdContext:
+        user_id = ""
+        chat_key = ""
+        session_id = "console-session-1"
+        adapter_key = "console-adapter"
+        agent_id = ""
+        bot_id = ""
+        db_user = None
+        db_chat_channel = None
+        channel_id = None
+
+    scope = plugin_method._build_scope_from_context(_CmdContext(), {})
+
+    assert scope.user_id is None
+    assert scope.agent_id == "console-adapter"
+    assert scope.run_id == plugin_method.get_preset_id("console-session-1")
+
+
 if __name__ == "__main__":
     test_agent_scope_switch_disables_persona_layer()
     test_add_default_prefers_long_term_layer()
@@ -624,8 +756,16 @@ if __name__ == "__main__":
     test_pre_search_passes_threshold_with_decent_score()
     test_combined_score_uses_config_weight()
     test_normalize_memory_metadata_sets_default_importance_and_expiration()
+    test_normalize_memory_metadata_discards_invalid_expiration()
+    test_resolve_cleanup_interval_seconds_has_minimum()
     test_parse_metadata_normalizes_importance_value()
     test_scan_records_from_registered_scopes_uses_scoped_get_all()
     test_cleanup_expired_memories_does_not_call_unscoped_get_all()
+    test_delete_memory_rejects_blank_memory_id()
+    test_memory_command_cleanup_dispatches_to_cleanup_expired_memories()
     test_register_scope_context_does_not_register_persona_read_fallback()
+    test_mem_command_group_requires_super_user()
+    test_mem_root_command_is_registered_with_super_user_permission()
+    test_mem_root_help_text_contains_key_commands()
+    test_build_scope_from_context_uses_resolve_fallback_fields()
     print("✅ test_memory_scope_risks passed")

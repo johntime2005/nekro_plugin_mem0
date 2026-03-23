@@ -3,13 +3,14 @@
 """
 
 import re
-from typing import List, Dict, Any, Optional
+from typing import Any
+
 from nekro_agent.core import logger
 
 
 def build_pre_search_query(
-    messages: List[Dict[str, Any]], query_message_count: int, max_length: int
-) -> Optional[str]:
+    messages: list[dict[str, Any]], query_message_count: int, max_length: int
+) -> str | None:
     """
     从历史消息生成预搜索查询。
 
@@ -89,7 +90,7 @@ def clean_message_content(content: str) -> str:
     return content.strip()
 
 
-def convert_db_messages_to_dict(db_messages: List[Any]) -> List[Dict[str, Any]]:
+def convert_db_messages_to_dict(db_messages: list[Any]) -> list[dict[str, Any]]:
     """
     将数据库消息对象转换为标准字典格式。
 

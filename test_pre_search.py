@@ -3,7 +3,7 @@
 """
 
 import re
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 
 def clean_message_content(content: str) -> str:
@@ -22,8 +22,8 @@ def clean_message_content(content: str) -> str:
 
 
 def build_pre_search_query(
-    messages: List[Dict[str, Any]], query_message_count: int, max_length: int
-) -> Optional[str]:
+    messages: list[dict[str, Any]], query_message_count: int, max_length: int
+) -> str | None:
     """从历史消息生成查询"""
     if not messages:
         return None
@@ -68,9 +68,9 @@ print('code block')
     print(f"  原始长度: {len(test_content)} 字符")
     print(f"  清洗后: {len(cleaned)} 字符")
     print(f"  内容: '{cleaned}'")
-    assert 'code block' not in cleaned, '代码块应被移除'
-    assert 'inline code' not in cleaned, '行内代码应被移除'
-    assert '<html>' not in cleaned, 'HTML标签应被移除'
+    assert "code block" not in cleaned, "代码块应被移除"
+    assert "inline code" not in cleaned, "行内代码应被移除"
+    assert "<html>" not in cleaned, "HTML标签应被移除"
     print("  ✓ 通过")
 
     # 测试2: 查询生成 - 单条消息
@@ -99,6 +99,7 @@ print('code block')
     print("\n[测试4] 查询生成 - 长度截断")
     messages = [{"role": "user", "content": "A" * 1000}]
     query = build_pre_search_query(messages, 10, 100)
+    assert query is not None, "查询不应为 None"
     print(f"  生成的查询长度: {len(query)} 字符")
     assert len(query) == 100, "应截断到最大长度"
     print("  ✓ 通过")
