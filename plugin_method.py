@@ -3,7 +3,7 @@
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import Counter
 from typing import Annotated, Any, Dict, List, Optional, Set, Tuple
 from nekro_agent.api.schemas import AgentCtx
@@ -72,6 +72,7 @@ def _normalize_memory_metadata(
     *,
     expiration_date: Optional[str] = None,
     importance: Optional[Any] = None,
+    auto_expiration: bool = False,
 ) -> Dict[str, Any]:
     merged_metadata: Dict[str, Any] = dict(metadata or {})
 
@@ -93,6 +94,21 @@ def _normalize_memory_metadata(
     merged_metadata["importance"] = _normalize_importance_value(
         importance_source, default=5
     )
+
+    # 自动过期：当未显式指定 expiration_date 时，根据类型+重要性自动计算
+    if auto_expiration and "expiration_date" not in merged_metadata:
+        from .enhanced_memory import calculate_expiration_date, resolve_memory_type
+
+        type_str = str(merged_metadata.get("TYPE", "contextual"))
+        mem_type = resolve_memory_type(type_str)
+        imp = merged_metadata["importance"]
+        now = datetime.now(timezone.utc)
+        exp_dt = calculate_expiration_date(mem_type, imp, now)
+        merged_metadata["expiration_date"] = exp_dt.isoformat()
+        merged_metadata["_original_ttl_seconds"] = int(
+            (exp_dt - now).total_seconds()
+        )
+
     return merged_metadata
 
 
@@ -895,6 +911,21 @@ def _summarize_memory_management(
     lines.append(f"- 已过期(待清理): {expired}")
     lines.append(f"- 无过期时间: {no_expire}")
 
+    # 访问追踪统计
+    accessed_count = 0
+    never_accessed = 0
+    for _, item in selected_rows:
+        metadata = (
+            item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        )
+        if metadata.get("access_count"):
+            accessed_count += 1
+        else:
+            never_accessed += 1
+    lines.append("\n📊 访问追踪")
+    lines.append(f"- 已被访问: {accessed_count}")
+    lines.append(f"- 从未访问: {never_accessed}")
+
     lines.append("\n🧭 建议优先维护（按综合分排序）")
     if top_rows:
         for item in top_rows:
@@ -908,6 +939,7 @@ def _summarize_memory_management(
                 metadata.get("importance"), default=5
             )
             expires = metadata.get("expiration_date") or "-"
+            access_cnt = metadata.get("access_count", 0)
             text = _extract_memory_text(item).replace("\n", " ").strip()[:42]
             if isinstance(tag, str):
                 tag_label = tag if tag.strip() else "(未标注)"
@@ -917,7 +949,7 @@ def _summarize_memory_management(
             else:
                 tag_label = "(未标注)"
             lines.append(
-                f"- [{memory_id}] [{layer}] [{tag_label}] [P{importance}] [expires={expires}] {text}"
+                f"- [{memory_id}] [{layer}] [{tag_label}] [P{importance}] [访问={access_cnt}] [expires={expires}] {text}"
             )
     else:
         lines.append("- (无可维护记录)")
@@ -1141,9 +1173,65 @@ async def _cleanup_expired_memories() -> None:
         logger.warning(f"[ExpiryCleanup] 清理失败: {exc}")
 
 
+async def _track_memory_access(
+    client: Any,
+    results: List[Dict[str, Any]],
+    plugin_config: Any,
+) -> None:
+    """后台更新被访问记忆的 last_accessed、access_count，并可选延长过期时间。"""
+    if not results or not getattr(plugin_config, "ACCESS_REINFORCEMENT_ENABLED", False):
+        # 即使强化关闭，仍记录访问统计
+        pass
+
+    now = datetime.now(timezone.utc)
+
+    for item in results:
+        memory_id = _memory_identifier(item)
+        if not memory_id:
+            continue
+
+        metadata = dict(item.get("metadata") or {})
+        if not isinstance(metadata, dict):
+            continue
+
+        # 更新访问计数和时间戳
+        access_count = int(metadata.get("access_count", 0)) + 1
+        metadata["access_count"] = access_count
+        metadata["last_accessed"] = now.isoformat()
+
+        # 访问强化：延长过期时间
+        if getattr(plugin_config, "ACCESS_REINFORCEMENT_ENABLED", False):
+            expiration_raw = metadata.get("expiration_date")
+            if expiration_raw:
+                expiration_dt = _parse_expiration_datetime(expiration_raw)
+                if expiration_dt and expiration_dt > now:
+                    original_ttl = metadata.get("_original_ttl_seconds")
+                    if original_ttl:
+                        extend_ratio = getattr(
+                            plugin_config, "REINFORCEMENT_EXTEND_RATIO", 0.2
+                        )
+                        extend_seconds = int(float(original_ttl) * extend_ratio)
+                        new_expiration = expiration_dt + timedelta(seconds=extend_seconds)
+                        metadata["expiration_date"] = new_expiration.isoformat()
+
+        # 后台写回 metadata
+        memory_text = _extract_memory_text(item)
+        if memory_text:
+            try:
+                await asyncio.to_thread(
+                    client.update, memory_id, memory_text, metadata=metadata
+                )
+            except TypeError:
+                pass  # 后端不支持 metadata 参数，静默跳过
+            except Exception as exc:
+                logger.debug(f"[AccessTrack] 更新失败 id={memory_id}: {exc}")
+
+
 async def _start_expiry_cleanup_loop() -> None:
     while True:
-        await asyncio.sleep(600)
+        config = get_memory_config()
+        interval = max(60, getattr(config, "EXPIRY_CLEANUP_INTERVAL", 600))
+        await asyncio.sleep(interval)
         await _cleanup_expired_memories()
 
 
@@ -1234,6 +1322,7 @@ async def add_memory(
         metadata,
         expiration_date=expiration_date,
         importance=importance,
+        auto_expiration=plugin_config.AUTO_EXPIRATION_ENABLED,
     )
 
     add_kwargs: Dict[str, Any] = {"metadata": merged_metadata, "infer": False}
@@ -1386,6 +1475,9 @@ async def search_memory(
         reverse=True,
     )
     merged_results = merged_results[:limit]
+
+    # 后台追踪访问
+    _fire_and_forget(_track_memory_access(client, merged_results, plugin_config))
 
     formatted = format_search_output(
         merged_results,
@@ -2190,6 +2282,9 @@ async def _execute_pre_search(_ctx: AgentCtx) -> Optional[str]:
         top_results = merged_results[
             : config.PRE_SEARCH_RESULT_LIMIT * completed_layer_count
         ]
+
+        # 后台追踪预搜索访问
+        _fire_and_forget(_track_memory_access(client, top_results, config))
 
         pre_search_threshold = config.PRE_SEARCH_SCORE_THRESHOLD
         if pre_search_threshold is None:

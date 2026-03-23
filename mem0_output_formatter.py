@@ -105,12 +105,14 @@ def _format_memory_line(item: Dict[str, Any]) -> str:
     tag = metadata.get("TYPE")
     importance = metadata.get("importance")
     expiration_date = metadata.get("expiration_date")
+    access_count = metadata.get("access_count")
     tag_part = f"[{tag}]" if tag else ""
     layer_part = f"[{layer}]" if layer else ""
     importance_part = f"[importance={importance}]" if importance is not None else ""
     expires_part = f"[expires={expiration_date}]" if expiration_date else ""
+    access_part = f"[访问={access_count}]" if access_count else ""
     score_part = f"(score={score:.3f})" if isinstance(score, (int, float)) else ""
-    return f"- {memory_id} {tag_part}{layer_part}{importance_part}{expires_part}{score_part} {text}".strip()
+    return f"- {memory_id} {tag_part}{layer_part}{importance_part}{access_part}{expires_part}{score_part} {text}".strip()
 
 
 def _format_memory_list(results: List[Dict[str, Any]]) -> str:
