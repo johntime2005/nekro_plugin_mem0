@@ -1282,7 +1282,7 @@ async def cleanup_expired_memories(
     SandboxMethodType.BEHAVIOR,
     name="添加记忆",
     description=(
-        "添加记忆（非阻塞）。示例：add_memory('用户喜欢猫', scope_level='global')"
+        "添加记忆（非阻塞）。示例：add_memory('临时任务到周五截止', scope_level='persona', expiration_date='2026-12-31T00:00:00Z')"
     ),
 )
 async def add_memory(
@@ -2484,6 +2484,14 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "await add_memory(‘用户今天心情好’, scope_level=’persona’, expiration_date=’2026-12-31T00:00:00Z’, importance=6)",
         "await send_text(_ctx, ‘好的，我记住了！’)  # send_text 仍需 _ctx",
         "",
+        "## ⏳ 过期策略（必须主动决策）",
+        "写入前先判断信息是否会过时；会过时就必须显式传 expiration_date（ISO8601）。",
+        "临时信息/任务进度/近期计划/短期上下文：必须传 expiration_date，不要省略。",
+        "长期稳定信息（长期偏好、身份事实）可不传 expiration_date，但仍建议给出较长过期时间并定期更新。",
+        "拿不准时优先传 expiration_date；建议默认 30 天，再用 update_memory_metadata 续期或清除。",
+        "示例：await add_memory('用户下周出差上海', scope_level='persona', expiration_date='2026-04-30T00:00:00Z', importance=6)",
+        "示例：await add_memory('用户周末前要提交报销', scope_level='persona', expiration_date='2026-03-29T18:00:00Z', importance=8)",
+        "",
         "## 读操作（必须单独代码块，等待结果后再 send_text）",
         "result = await search_memory(‘用户喜欢什么’)  # 语义搜索",
         "result = await search_memory(‘猫’, layers=[‘global’])  # 指定层",
@@ -2494,8 +2502,9 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "## 维护",
         "await update_memory(memory_id, ‘新内容’)  # 更新",
         "await update_memory_metadata(memory_id, expiration_date=‘2026-12-31T00:00:00Z’)  # 仅更新元数据/过期时间",
+        "await update_memory_metadata(memory_id, clear_expiration=True)  # 转为长期记忆时清除过期时间",
         "await delete_memory(memory_id)  # 删除过时记忆（主动维护！）",
-        "建议在 add_memory 时始终设置 importance（1-10），并为短期信息设置 expiration_date（ISO8601）。",
+        "写入时始终设置 importance（1-10）；对会过时的信息优先显式设置 expiration_date（ISO8601）。",
         "",
         "## 层级说明",
         "conversation: 仅当前对话有效",
