@@ -1308,8 +1308,8 @@ async def add_memory(
     通常只需传 memory 和 scope_level，框架自动从上下文推断 user_id/agent_id/run_id。
 
     示例：
-        await add_memory(_ctx, '喜欢科幻电影', scope_level='persona')
-        await add_memory(_ctx, '用户真实姓名：张三', scope_level='global')
+        add_memory('喜欢科幻电影', scope_level='persona')
+        add_memory('用户真实姓名：张三', scope_level='global')
     """
     plugin_config = get_memory_config()
     client = await get_mem0_client()
@@ -2479,9 +2479,9 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "❌ 错误：add_memory(_ctx, '内容')  # 会导致 NameError",
         "✅ 正确：add_memory('内容', scope_level='global')",
         "",
-        "## 写操作（非阻塞，可与 send_text 同一代码块）",
-        "await add_memory(‘用户喜欢猫’, scope_level=’global’, importance=8)",
-        "await add_memory(‘用户今天心情好’, scope_level=’persona’, expiration_date=’2026-12-31T00:00:00Z’, importance=6)",
+        "## 写操作（非阻塞，不要 await；可与 send_text 同一代码块）",
+        "add_memory('用户喜欢猫', scope_level='global', importance=8)",
+        "add_memory('用户今天心情好', scope_level='persona', expiration_date='2026-12-31T00:00:00Z', importance=6)",
         "await send_text(_ctx, ‘好的，我记住了！’)  # send_text 仍需 _ctx",
         "",
         "## ⏳ 过期策略（必须主动决策）",
@@ -2489,8 +2489,8 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         "临时信息/任务进度/近期计划/短期上下文：必须传 expiration_date，不要省略。",
         "长期稳定信息（长期偏好、身份事实）可不传 expiration_date，但仍建议给出较长过期时间并定期更新。",
         "拿不准时优先传 expiration_date；建议默认 30 天，再用 update_memory_metadata 续期或清除。",
-        "示例：await add_memory('用户下周出差上海', scope_level='persona', expiration_date='2026-04-30T00:00:00Z', importance=6)",
-        "示例：await add_memory('用户周末前要提交报销', scope_level='persona', expiration_date='2026-03-29T18:00:00Z', importance=8)",
+        "示例：add_memory('用户下周出差上海', scope_level='persona', expiration_date='2026-04-30T00:00:00Z', importance=6)",
+        "示例：add_memory('用户周末前要提交报销', scope_level='persona', expiration_date='2026-03-29T18:00:00Z', importance=8)",
         "",
         "## 读操作（必须单独代码块，等待结果后再 send_text）",
         "result = await search_memory(‘用户喜欢什么’)  # 语义搜索",
